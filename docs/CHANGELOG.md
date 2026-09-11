@@ -4,6 +4,31 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)。
 
+## [0.9] - 2026-09-12
+
+### Added
+
+* **3D 模型支持（l3d）**：launcher 新增 glTF 骨骼动画渲染管线，资产按"1 个模型 + n 个动作骨骼"组织，与 Live2D 模型并存于同一套 `/api/models` 资产管理（上传/选择/删除/持久化全复用）。
+  * **导出管线** `tools/blend_to_model3d.py` + `tools/blend_export_worker.py`：Blender（5.x LTS 实测）无头导出 `.blend` → l3d 包（zip：`manifest.json` + `model.glb` + `anims/<动作>.glb`）。逐动作**单步重开 blend 导出**（glTF 导出器 ACTIONS 模式会带上文件里全部 stash 的动作，只有"文件里只留目标动作"是确定性的）；动作名 = 文件名主干；自动把 `idle*` 动作写为 `default_animation`（上屏自动循环）；无骨架 blend 合法（静态网格）。附 `tools/make_test_blend.py` 合成带骨架+3 动作+贴图的测试工程。
+  * **设备端 l3d 运行时**（`Sample/src/minimum/java/com.live2d.demo.minimum/l3d/`，纯 Java + GLES20，Java 7 语法）：GLB 解析（自有子集：POSITION/NORMAL/TEXCOORD_0/JOINTS_0/WEIGHTS_0、LINEAR/STEP）、节点树全局矩阵、骨骼动画（NLERP 四元数，关节的 translation 通道丢弃——Blender 骨骼动画 location 恒 0，应用会清掉 rest 骨长偏移使骨架塌缩）、按包目录懒加载动作、相机按变换后包围盒自动取景、pose（x/y/zoom）与 flipV 镜像补偿语义对齐 Live2D。
+  * **蒙皮 = CPU 实现**：每帧把蒙皮顶点写入动态 VBO（pos3+nor3(0)+uv2 流式上传），着色器退化为 `uMVP × position` + 贴图采样。这是对本机驱动的适配（见 Fixed），也是 375 骨模型唯一可行路径（uniform 调色板与 float 纹理调色板都不可用）。
+  * **控制面**：`GET/POST /api/control/animation`（动作清单/播放/停止单次/倍速）；descriptor 增加 `type`（`live2d`/`l3d`）与 l3d 的 `format_version`/`animations`；`/api/status` 增加 `type`；Live2D 专属控制端点在 l3d 上屏时返回 `409`（pose/animation 共享）。上传按包内容自动识别类型，l3d 校验 manifest/glTF 魔数。
+  * `docs/API.md` v0.6（§5 包格式、§6.8、错误码、已知限制）。
+
+### Fixed
+
+* **本机（Adreno 304 老驱动）三个 GL 特性不可用/误编译，l3d 管线全部绕开**（各有真机截图证据链）：
+  1. `mat4 长乘法链`（`uProjView * uViewPose * uModel * p`）误编译——渲染出巨大错位图形；改 CPU 预乘单个 `uMVP`。
+  2. `mat4 数组 uniform`（≤64 骨 uniform 调色板）`glUniform4fv` 恒报 `GL_INVALID_OPERATION`（换 `name[0]` 寻址也一样）——弃用 uniform 调色板。
+  3. `OES_texture_float` + 顶点纹理取样（float 纹理骨骼调色板）采样结果不可靠（CPU 同数据正确、GPU 蒙皮后顶点飞散）——弃用 VTF。
+* **`ByteBuffer.wrap(bin, start, span)` position 语义坑**：wrap 后 `position(i*stride)` 设的是**绝对数组下标**（capacity=整个数组），i=0 时跳回 bin[0]——JOINTS_0/WEIGHTS_0 全部读成 POSITION 数据（该 bug 在 miku_eve 上表现为蒙皮坐标 1e38、画面全黑；testrig 恰好所有 rest 调色板相近而未被暴露）。修为 wrap 全数组 + 显式 `position(start)`/`limit(start+span)`，调用方以返回时 position 为基址。
+* **Live2D 遗留 enabled 顶点属性数组**指向其自身小 buffer：l3d draw 时 GL 校验所有 enabled 数组越界报 `GL_INVALID_OPERATION`、画面全黑——帧首 `resetAttribArrays()` 全量禁用。
+* miku_eve 源资产（FBX 导入链）带垃圾权重顶点：rest 蒙皮坐标 1e38（有限但离谱），取景包围盒改 0.5%~99.5% 分位数，蒙皮输出做合法性盒（出界顶点收缩为中心，退化三角形不可见）。
+
+### Verified
+
+* 真机（C2-CMCC）：`testrig`（合成 3 骨 3 动作）与 `miku_eve`（375 骨、3 网格 9.5k 顶点、3 贴图、3 动作，样例 .blend 导出）全链路：上传 → 选择上屏 → 默认/指定动作循环播放（截图连续帧差异证实动画）→ 停止 → 切回 Live2D 无回归（22fps）。l3d 静置/动画实测 14~15fps（GLThread 单核 CPU 蒙皮），RSS 35MB 稳定；负向用例（未知动作、live2d 上屏时 POST animation 409、坏 zip 400）全过。screencap 中人物倒立为预期（投影镜像补偿，实体屏正显）。
+
 ## [0.8] - 2026-09-11
 
 ### Added

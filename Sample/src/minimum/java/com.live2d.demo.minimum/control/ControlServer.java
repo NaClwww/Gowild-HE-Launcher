@@ -306,6 +306,67 @@ public class ControlServer extends NanoHTTPD {
         return methodNotAllowed("GET, POST");
     }
 
+    /** GET/POST /api/control/animation：l3d 动作列表与播放。POST {"name","loop":true,"speed":1} 或 {"stop":true}。 */
+    private Response animationCtl(IHTTPSession s, Method method, LAppMinimumLive2DManager manager) throws Exception {
+        boolean is3d = "l3d".equals(LAppMinimumLive2DManager.peekCurrentType());
+        if (method == Method.GET) {
+            JSONObject o = new JSONObject();
+            o.put("available", is3d);
+            String playing = LAppMinimumLive2DManager.peekPlayingAnim();
+            o.put("current", playing == null ? JSONObject.NULL : playing);
+            o.put("loop", LAppMinimumLive2DManager.peekPlayingLoop());
+            o.put("speed", (double) LAppMinimumLive2DManager.peekPlayingSpeed());
+            if (is3d) {
+                ModelRepository repo = ModelRepository.get(
+                    LAppMinimumDelegate.getInstance().getActivity());
+                String selected = repo.getSelected();
+                ModelRepository.Descriptor d = selected != null ? repo.find(selected) : null;
+                JSONArray arr = new JSONArray();
+                if (d != null && "l3d".equals(d.type)) {
+                    for (int i = 0; i < d.animationNames.size(); i++) {
+                        arr.put(new JSONObject()
+                            .put("name", d.animationNames.get(i))
+                            .put("duration_s", d.animationDurations.get(i)));
+                    }
+                }
+                o.put("animations", arr);
+            }
+            return ok(o);
+        }
+        if (method == Method.POST) {
+            if (!is3d) {
+                return json(409, err("current model is not l3d"));
+            }
+            JSONObject in;
+            try {
+                in = new JSONObject(readBody(s));
+            } catch (Exception e) {
+                return json(400, err("invalid JSON body"));
+            }
+            if (in.optBoolean("stop", false)) {
+                LAppMinimumDelegate.getInstance().post(new Runnable() {
+                    @Override
+                    public void run() {
+                        LAppMinimumLive2DManager.getInstance().stopAnimation();
+                    }
+                });
+                return json(202, new JSONObject().put("ok", true).put("stopped", true));
+            }
+            final String name = in.optString("name", "");
+            final float speed = (float) in.optDouble("speed", 1.0);
+            final boolean loop = in.optBoolean("loop", true);
+            LAppMinimumDelegate.getInstance().post(new Runnable() {
+                @Override
+                public void run() {
+                    LAppMinimumLive2DManager.getInstance().playAnimation(name, loop, speed);
+                }
+            });
+            return json(202, new JSONObject().put("ok", true).put("playing", name)
+                .put("loop", loop).put("speed", (double) speed));
+        }
+        return methodNotAllowed("GET, POST");
+    }
+
     private Response select(String name, ModelRepository repo) throws Exception {
         if (!ModelRepository.isValidName(name)) return json(400, err("invalid name: " + name));
         ModelRepository.Descriptor d = repo.find(name);
@@ -354,6 +415,17 @@ public class ControlServer extends NanoHTTPD {
 
         if (sub.equals("pose")) {
             return pose(s, method);
+        }
+
+        // l3d 动作播放（1 模型 + n 动作骨骼包；Live2D 模型请用 motion/expression）
+        if (sub.equals("animation")) {
+            return animationCtl(s, method, manager);
+        }
+
+        // 以下为 Live2D 专属控制；l3d 上屏时明确拒绝，避免误操作无响应
+        if (!"live2d".equals(LAppMinimumLive2DManager.peekCurrentType())) {
+            return json(409, err("current model is l3d; live2d control \"" + sub
+                + "\" unavailable (pose/animation are shared)"));
         }
 
         // 视线/头随动：不需要模型对象（dragManager 跨线程喂）
@@ -614,6 +686,7 @@ public class ControlServer extends NanoHTTPD {
     private Response status() throws Exception {        JSONObject o = new JSONObject();
         o.put("app", "live2d_luncher");
         o.put("version", "0.1");
+        o.put("type", LAppMinimumLive2DManager.peekCurrentType());
         String model = LAppMinimumLive2DManager.peekCurrentModel();
         if (model != null) o.put("model", model);
         String err = LAppMinimumLive2DManager.peekLastError();
@@ -636,12 +709,24 @@ public class ControlServer extends NanoHTTPD {
     private static JSONObject toJson(ModelRepository.Descriptor d, boolean loaded, boolean selected) throws Exception {
         JSONObject o = new JSONObject();
         o.put("name", d.name);
+        o.put("type", d.type);
         o.put("source", d.source == ModelRepository.Source.BUILTIN ? "builtin" : "external");
-        o.put("moc3_version", d.moc3Version);
-        o.put("moc3_bytes", d.moc3Bytes);
-        o.put("motion_groups", d.motionGroups);
-        o.put("physics", d.hasPhysics);
-        o.put("textures", d.textureCount);
+        if ("l3d".equals(d.type)) {
+            o.put("format_version", d.formatVersion);
+            JSONArray anims = new JSONArray();
+            for (int i = 0; i < d.animationNames.size(); i++) {
+                anims.put(new JSONObject()
+                    .put("name", d.animationNames.get(i))
+                    .put("duration_s", d.animationDurations.get(i)));
+            }
+            o.put("animations", anims);
+        } else {
+            o.put("moc3_version", d.moc3Version);
+            o.put("moc3_bytes", d.moc3Bytes);
+            o.put("motion_groups", d.motionGroups);
+            o.put("physics", d.hasPhysics);
+            o.put("textures", d.textureCount);
+        }
         o.put("loaded", loaded);
         o.put("selected", selected);
         return o;

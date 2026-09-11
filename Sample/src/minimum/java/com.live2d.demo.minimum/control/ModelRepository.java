@@ -45,6 +45,8 @@ public class ModelRepository {
     public static class Descriptor {
         public String name;
         public Source source;
+        /** "live2d"（Cubism model3.json）或 "l3d"（glTF 骨骼动画包，manifest.json 约定）。 */
+        public String type = "live2d";
         public String homeDir;          // 以 / 结尾的资源前缀（assets 相对目录或绝对路径）
         public String model3FileName;
         public String moc3Version = "?";
@@ -52,6 +54,10 @@ public class ModelRepository {
         public int motionGroups;
         public boolean hasPhysics;
         public int textureCount;
+        // l3d 专属
+        public int formatVersion = -1;
+        public final List<String> animationNames = new ArrayList<String>();
+        public final List<Double> animationDurations = new ArrayList<Double>();
     }
 
     private static ModelRepository s_instance;
@@ -116,14 +122,27 @@ public class ModelRepository {
                 if (!m3.isFile()) {
                     m3 = findModel3Json(dir, 0);
                 }
-                if (!m3.isFile()) continue;
-                Descriptor d = new Descriptor();
-                d.name = dir.getName();
-                d.source = Source.EXTERNAL;
-                d.homeDir = dir.getAbsolutePath() + "/";
-                d.model3FileName = m3.getName();
-                fillFromModel3(d);
-                out.add(d);
+                if (m3 != null && m3.isFile()) {
+                    Descriptor d = new Descriptor();
+                    d.name = dir.getName();
+                    d.source = Source.EXTERNAL;
+                    d.homeDir = dir.getAbsolutePath() + "/";
+                    d.model3FileName = m3.getName();
+                    fillFromModel3(d);
+                    out.add(d);
+                    continue;
+                }
+                File mf = findManifest(dir, 0);
+                if (mf != null) {
+                    Descriptor d = new Descriptor();
+                    d.name = dir.getName();
+                    d.type = "l3d";
+                    d.source = Source.EXTERNAL;
+                    d.homeDir = dir.getAbsolutePath() + "/";
+                    d.model3FileName = mf.getName();   // 元数据文件名沿用该字段
+                    fillFromManifest(d, mf);
+                    out.add(d);
+                }
             }
         }
         return out;
@@ -178,6 +197,40 @@ public class ModelRepository {
         return path.startsWith("/") && new File(path).isFile();
     }
 
+    /** 从 l3d 的 manifest.json 解析描述（字段缺失由 fillFromManifest 校验兜底）。 */
+    private void fillFromManifest(Descriptor d, File manifestFile) {
+        try {
+            JSONObject root = new JSONObject(new String(readAll(new FileInputStream(manifestFile)), "UTF-8"));
+            d.formatVersion = root.optInt("format_version", -1);
+            JSONArray anims = root.optJSONArray("animations");
+            if (anims != null) {
+                for (int i = 0; i < anims.length(); i++) {
+                    JSONObject a = anims.getJSONObject(i);
+                    d.animationNames.add(a.optString("name", ""));
+                    d.animationDurations.add(a.optDouble("duration_s", 0));
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "parse manifest.json failed: " + d.name, e);
+        }
+    }
+
+    private static File findManifest(File dir, int depth) {
+        if (depth > 3) return null;
+        File[] files = dir.listFiles();
+        if (files == null) return null;
+        for (File f : files) {
+            if (f.isFile() && f.getName().equals("manifest.json")) return f;
+        }
+        for (File f : files) {
+            if (f.isDirectory()) {
+                File r = findManifest(f, depth + 1);
+                if (r != null) return r;
+            }
+        }
+        return null;
+    }
+
     private static byte[] readHeader(String path, int n) {
         InputStream is = null;
         try {
@@ -216,8 +269,9 @@ public class ModelRepository {
     }
 
     /**
-     * 接收 zip 上传：暂存 → 解压（防 Zip Slip）→ 定位 model3.json → 校验 moc3 → 落位。
-     * nameParam 为空时用 model3.json 文件名主干。
+     * 接收 zip 上传：暂存 → 解压（防 Zip Slip）→ 按包类型定位与校验 → 落位。
+     * live2d = *.model3.json + moc3 校验；l3d = manifest.json + model/anims glb 校验。
+     * nameParam 为空时用 model3.json 主干或 manifest.name。
      */
     public Descriptor upload(InputStream in, long contentLength, String nameParam) throws IOException {
         if (contentLength <= 0) throw new ModelException(400, "Content-Length required");
@@ -230,20 +284,52 @@ public class ModelRepository {
             unzip(zipTmp, staging);
 
             File model3 = findModel3Json(staging, 0);
-            if (model3 == null) throw new ModelException(400, "zip does not contain a .model3.json");
-
-            File modelDir = model3.getParentFile() != null ? model3.getParentFile() : staging;
-            String stem = model3.getName();
-            if (stem.endsWith(".model3.json")) {
-                stem = stem.substring(0, stem.length() - ".model3.json".length());
+            File manifest = null;
+            if (model3 == null) {
+                manifest = findManifest(staging, 0);
+                if (manifest == null) {
+                    throw new ModelException(400,
+                        "zip contains neither a .model3.json nor a l3d manifest.json");
+                }
             }
-            String finalName = nameParam != null && nameParam.length() > 0 ? nameParam : stem;
+
+            File modelDir = (model3 != null ? model3 : manifest).getParentFile();
+            if (modelDir == null) modelDir = staging;
+            String finalName;
+            if (model3 != null) {
+                String stem = model3.getName();
+                if (stem.endsWith(".model3.json")) {
+                    stem = stem.substring(0, stem.length() - ".model3.json".length());
+                }
+                finalName = stem;
+            } else {
+                String stem = "";
+                try {
+                    JSONObject m = new JSONObject(
+                        new String(readAll(new FileInputStream(manifest)), "UTF-8"));
+                    stem = m.optString("name", "");
+                } catch (Exception ignored) {
+                }
+                finalName = stem;
+            }
+            if (nameParam != null && nameParam.length() > 0) finalName = nameParam;
             if (!isValidName(finalName)) throw new ModelException(400, "invalid model name: " + finalName);
 
             File target = new File(externalRoot, finalName);
             if (target.exists()) throw new ModelException(409, "model already exists: " + finalName);
 
-            validateMoc(modelDir, model3);
+            Descriptor d = new Descriptor();
+            d.name = finalName;
+            d.source = Source.EXTERNAL;
+            if (model3 != null) {
+                validateMoc(modelDir, model3);
+                d.type = "live2d";
+                d.model3FileName = model3.getName();
+            } else {
+                validateL3d(modelDir, manifest, d);
+                d.type = "l3d";
+                d.model3FileName = manifest.getName();
+            }
 
             //noinspection ResultOfMethodCallIgnored
             target.mkdirs();
@@ -259,17 +345,51 @@ public class ModelRepository {
             }
             deleteRecursively(staging);
 
-            Descriptor d = new Descriptor();
-            d.name = finalName;
-            d.source = Source.EXTERNAL;
             d.homeDir = target.getAbsolutePath() + "/";
-            d.model3FileName = model3.getName();
-            fillFromModel3(d);
+            if (model3 != null) {
+                fillFromModel3(d);
+            } else {
+                fillFromManifest(d, new File(target, manifest.getName()));
+            }
             return d;
         } finally {
             //noinspection ResultOfMethodCallIgnored
             zipTmp.delete();
             deleteRecursively(staging); // 失败路径清理残留
+        }
+    }
+
+    /** l3d 包校验：format/type、model.glb 魔数、动作文件存在且是 glb。 */
+    private void validateL3d(File modelDir, File manifest, Descriptor d) {
+        try {
+            JSONObject root = new JSONObject(new String(readAll(new FileInputStream(manifest)), "UTF-8"));
+            int fmt = root.optInt("format_version", -1);
+            if (fmt != 1) throw new ModelException(400, "unsupported l3d format_version: " + fmt);
+            if (!"l3d".equals(root.optString("type", ""))) {
+                throw new ModelException(400, "manifest type must be \"l3d\"");
+            }
+            String modelFile = root.optString("model", "");
+            if (modelFile.equals("")) throw new ModelException(400, "manifest has no model");
+            checkGlb(new File(modelDir, modelFile));
+            JSONArray anims = root.optJSONArray("animations");
+            if (anims != null) {
+                for (int i = 0; i < anims.length(); i++) {
+                    String f = anims.getJSONObject(i).optString("file", "");
+                    if (!f.equals("")) checkGlb(new File(modelDir, f));
+                }
+            }
+        } catch (ModelException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ModelException(400, "bad manifest.json: " + e);
+        }
+    }
+
+    private static void checkGlb(File f) {
+        if (!f.isFile()) throw new ModelException(400, "glb missing: " + f.getName());
+        byte[] head = readHeader(f.getAbsolutePath(), 4);
+        if (head.length < 4 || head[0] != 'g' || head[1] != 'l' || head[2] != 'T' || head[3] != 'F') {
+            throw new ModelException(400, "not a valid glb: " + f.getName());
         }
     }
 

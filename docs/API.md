@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **文档版本** | 0.5 |
-| **更新日期** | 2026-09-11 |
+| **文档版本** | 0.6 |
+| **更新日期** | 2026-09-12 |
 | **服务端口** | `8900`（HTTP，设备端常驻，随 app 前台启停） |
 | **实测环境** | la0920 智能音箱 · Android 5.1.1 (API 22) · armeabi-v7a · 型号 C2-CMCC |
 | **实现** | NanoHTTPD 2.3.1，`Sample/src/minimum/java/com.live2d.demo.minimum/control/` |
@@ -42,8 +42,8 @@
 | 资源组 | 路由前缀 | 能力 |
 |---|---|---|
 | 系统状态 | `/api/status` | app 版本、当前模型、实测 FPS、运行时长、摄像头与舞台灯摘要 |
-| 模型资产 | `/api/models` | 查询 / 上传（zip）/ 选择上屏 / 删除，内置+外置双源 |
-| 运行时控制 | `/api/control/*` | 姿态、身体动作、面部表情、参数直控、口型、视线随动、待机策略 |
+| 模型资产 | `/api/models` | 查询 / 上传（zip）/ 选择上屏 / 删除，内置+外置双源；支持 Live2D 与 l3d（3D 骨骼动画）两种包 |
+| 运行时控制 | `/api/control/*` | 姿态、身体动作、面部表情、参数直控、口型、视线随动、待机策略；l3d 模型为骨骼动作播放（`animation`） |
 | 摄像头 | `/api/camera` | 开关控制、MJPEG 实时流、单帧快照 |
 | 舞台灯 | `/api/light` | 开关、三色常亮 / 闪烁、舞台全亮分段亮度、逐灯直控 |
 | 语音采集 | `/api/voice/*` | 麦克风原始 PCM 上行，供 Mac 侧 ASR |
@@ -115,6 +115,7 @@ BASE=http://<设备IP>:8900
 {
   "app": "live2d_luncher",
   "version": "0.1",
+  "type": "live2d",
   "model": "21miku",
   "fps": 23.41,
   "uptime_s": 5,
@@ -127,6 +128,7 @@ BASE=http://<设备IP>:8900
 |---|---|---|
 | `app` | string | 固定 `live2d_luncher` |
 | `version` | string | app 版本号 |
+| `type` | string | 当前上屏渲染管线：`live2d` / `l3d`（加载失败回落内置模型时亦随实际管线） |
 | `model` | string | 当前上屏模型名；未加载时缺省 |
 | `last_error` | string | 仅在模型加载失败等异常时出现 |
 | `fps` | number | 实测渲染帧率（1s 滑动窗口） |
@@ -138,6 +140,22 @@ BASE=http://<设备IP>:8900
 
 模型仓库双源：`builtin`（APK assets，只读）与 `external`（`/sdcard/live2d/models/`，可传可删）。上屏模型由 `selected` 持久化项决定，app 启动自动加载。
 
+模型分两类（descriptor 的 `type` 字段）：
+
+- **`live2d`**：Cubism 模型（`*.model3.json` + moc3），Live2D 渲染管线。
+- **`l3d`**：3D 骨骼动画包（glTF-GLB），l3d 渲染管线。**包结构约定**：
+
+```
+manifest.json            {"format_version":1, "type":"l3d", "name":"...",
+                          "model":"model.glb",
+                          "animations":[{"name":"wave","file":"anims/wave.glb","duration_s":1.04}, ...],
+                          "default_animation":"idle"|null}
+model.glb                网格 + 骨架 rest + 蒙皮 + 贴图（无动画）
+anims/<动作>.glb          每个动作一个文件（骨架 + 单条 LINEAR 动画）
+```
+
+包由 `tools/blend_to_model3d.py` 从 Blender 工程一键导出（Blender 无头模式：网格+骨架 rest 出 `model.glb`，逐动作各出 `anims/<名>.glb`——即"1 个模型 + n 个动作骨骼"，加动作不用重传模型）。设备端约定：动作名 = 文件名主干；`default_animation`（导出器自动取名为 `idle*` 的动作）在模型上屏时自动循环播放；动画按需懒加载。
+
 ### 5.1 `GET /api/models` — 列出全部模型
 
 ```json
@@ -145,6 +163,7 @@ BASE=http://<设备IP>:8900
   "models": [
     {
       "name": "21miku",
+      "type": "live2d",
       "source": "external",
       "moc3_version": "3.3 (0x02)",
       "moc3_bytes": 1055488,
@@ -153,6 +172,18 @@ BASE=http://<设备IP>:8900
       "textures": 1,
       "loaded": true,
       "selected": true
+    },
+    {
+      "name": "miku_eve",
+      "type": "l3d",
+      "source": "external",
+      "format_version": 1,
+      "animations": [
+        { "name": "Binding_Check", "duration_s": 1.9667 },
+        { "name": "eve_117010202", "duration_s": 4.0 }
+      ],
+      "loaded": false,
+      "selected": false
     }
   ]
 }
@@ -160,9 +191,12 @@ BASE=http://<设备IP>:8900
 
 | 字段 | 说明 |
 |---|---|
+| `type` | `live2d` / `l3d`；两者字段集不同 |
 | `source` | `builtin` / `external` |
-| `moc3_version` | 服务端解析 moc3 文件头得出的格式版本（3.0 / 3.3 / 4.0 / 4.2 / 5.0） |
-| `motion_groups` | model3.json 声明的动作组数（即 §6.2/6.3 `groups` 列表的长度上限） |
+| `moc3_version` | （live2d）moc3 文件头解析出的格式版本（3.0 / 3.3 / 4.0 / 4.2 / 5.0） |
+| `motion_groups` | （live2d）model3.json 声明的动作组数（即 §6.2/6.3 `groups` 列表的长度上限） |
+| `format_version` | （l3d）包格式版本，当前 1 |
+| `animations` | （l3d）动作清单：`name`（播放时用）/ `duration_s` |
 | `loaded` | 当前已上屏 |
 | `selected` | 持久化选中项（重启自动加载） |
 
@@ -172,9 +206,11 @@ BASE=http://<设备IP>:8900
 curl -X POST --data-binary @model.zip "$BASE/api/models?name=21miku"
 ```
 
-- **Body 为模型 zip 整包**（`model3.json` + `moc3` + 贴图 + `motions/`，目录结构随意，服务端自动定位 model3.json），`Content-Type` 不限。
-- `?name=`：可选。缺省取 model3.json 文件名主干；合法字符 `[A-Za-z0-9._-]`，≤64 字节。
-- 服务端校验：zip 内必须存在 `*.model3.json`；moc3 魔数 `MOC3` 且版本字节 ∈ 1..5；上限 200MB；已做 Zip Slip 防护。
+- **Body 为模型 zip 整包**，`Content-Type` 不限。两类包按内容自动识别：
+  - **live2d**：含 `*.model3.json`（+ moc3 + 贴图 + motions/，目录结构随意，服务端自动定位）；校验 moc3 魔数 `MOC3` 且版本字节 ∈ 1..5。
+  - **l3d**：含 `manifest.json`（结构见上）；校验 `format_version==1`、`type=="l3d"`、`model.glb` 与各动作文件存在且为 glTF 魔数。缺省名取 manifest 的 `name`。
+- `?name=`：可选，覆盖缺省名；合法字符 `[A-Za-z0-9._-]`，≤64 字节。
+- 上限 200MB；已做 Zip Slip 防护。
 
 | 状态码 | 场景 |
 |---|---|
@@ -203,7 +239,8 @@ curl -X POST "$BASE/api/models/21miku/select"
 # 202 {"ok":true,"loading":"21miku"}
 ```
 
-- **异步**（202）：GL 线程解析 moc3 + 上传贴图，实测 **2~2.5s** 完成上屏；期间画面停留在旧模型最后一帧，无黑屏。以 `/api/status` 的 `model` 变化为准。
+- **异步**（202）：GL 线程解析 + 上传贴图，实测 live2d **2~2.5s**、l3d **3~8s**（视包大小）完成上屏；期间画面停留在旧模型最后一帧，无黑屏。以 `/api/status` 的 `model` 变化为准。
+- l3d 模型上屏后，运行时控制用 §6.8 `animation`（pose 共享）；live2d 专属端点（motion/expression/param/lipsync/idle/lookat）返回 `409`。
 - 选中项**持久化**：重启 app 自动加载。
 - 切换语义：**姿态（pose）保留**；动作 / 表情 / 参数直控 / 口型等临场状态清空（新模型不继承）；待机策略回到默认 `on`（见 §11）。
 
@@ -217,8 +254,10 @@ curl -X POST "$BASE/api/models/21miku/select"
 ## 6. 运行时控制
 
 > 前置：渲染器就绪且有已加载模型，否则所有 control 端点返回 `503`（渲染器未就绪时 `error` 为 `renderer not ready`，稍后重试）。
+>
+> **端点与模型类型**：`pose` 与 `animation` 对两类模型通用；`motion` / `expression` / `param` / `lipsync` / `idle` / `lookat` 为 Live2D 专属，l3d 模型上屏时返回 `409`（`error` 提示改用 `animation`）。
 
-参数生效优先级（高 → 低）：
+参数生效优先级（高 → 低；仅 Live2D）：
 
 ```
 参数直控 / 口型（每帧覆盖） > 物理 / 呼吸 > 面部表情层 > 身体动作层 > 待机
@@ -341,6 +380,38 @@ curl -X POST -d '{"mode":"on","interval_s":30}' "$BASE/api/control/idle"
 - `off`：不自动播动作，仅呼吸 + 眨眼 + 物理残留。
 - ⚠️ 当前为**会话级状态**：切模型或重启 app 回到默认 `on`（持久化见路线图 `/api/config`）。
 - `200`；`400` mode 非法。
+
+### 6.8 骨骼动作播放（l3d）— `GET|POST /api/control/animation`
+
+3D 模型（`type:"l3d"`）的"1 模型 + n 动作骨骼"播放控制。
+
+```bash
+# 动作清单 + 当前状态
+curl "$BASE/api/control/animation"
+# {"available":true,"current":"eve_117010202","loop":true,"speed":1,
+#  "animations":[{"name":"Binding_Check","duration_s":1.9667},
+#                {"name":"eve_117010202","duration_s":4.0}, ...]}
+
+# 播放（循环）；未知动作 202 受理但 GL 线程校验失败，`current` 不变
+curl -X POST -d '{"name":"eve_117010202","loop":true}' "$BASE/api/control/animation"   # 202
+
+# 单次播放 + 倍速（0.05~4.0，播放完停在末帧）
+curl -X POST -d '{"name":"wave","loop":false,"speed":1.5}' "$BASE/api/control/animation"
+
+# 停止（停在当前帧）
+curl -X POST -d '{"stop":true}' "$BASE/api/control/animation"                          # 202
+```
+
+| 字段（POST） | 说明 |
+|---|---|
+| `name` | 要播放的动作名（= descriptor `animations[].name`） |
+| `loop` | 缺省 `true`；`false` 播完停在末帧 |
+| `speed` | 缺省 `1.0`，限 0.05~4.0 |
+| `stop` | `true` 停止播放（优先于 `name`） |
+
+- `GET` 的 `available` 为 `false` 表示当前不是 l3d 模型（此时无 `animations` 字段）。
+- 播放是 GL 线程异步行为（202）；`current`/`loop`/`speed` 从 `GET` 读实际生效值。动作文件首次播放时懒解析（miku_eve 375 骨约 1s，帧内一次性的小卡顿）。
+- Live2D 模型上屏时 `POST` 返回 `409 current model is not l3d`。
 
 ## 7. 摄像头
 
@@ -668,6 +739,7 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 | 口型权重 | 硬编码（open_y=1.0 / scale_y=0.8），不可调 |
 | 呼吸 / 眨眼开关 | 未提供（常开） |
 | 摄像头方向 / 音频 | 传感器原生方向未旋转；无音频轨 |
+| l3d 渲染 | unlit（贴图原样，无实时光照）；材质只取 baseColorTexture/Factor；顶点色（COLOR_0/1）忽略；CUBICSPLINE 动画拒绝（导出管线为 LINEAR，正常不触发）；蒙皮为 CPU 实现，约 9.5k 顶点模型实测 ~14fps |
 | 响应包裹 | 部分成功响应缺 `"ok":true`（以 HTTP 状态码为准） |
 | 舞台灯可连性 | 依赖 SELinux `Permissive`：策略对 `untrusted_app` 连该 socket 是 denied，仅 permissive 放行（见 §8 末尾） |
 | 舞台灯呼吸效果 | 守护的 `LEDB`/`libLedBreath` 通道未逆向出参数格式，未暴露（只做了常亮/闪烁/逐灯） |
@@ -689,9 +761,9 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 
 | 码 | 典型 `error` 文案 | 处置 |
 |---|---|---|
-| 400 | `invalid JSON body` / `missing level (0..1)` / `missing param id` / `missing mode` / `unknown mode: X` / `blink only supported for red/green/blue/color` / `color mode needs rgb:[r,g,b] (0..255) or color:"#rrggbb"` / `custom mode needs leds: [...]` / `leds[i].id out of range 1..18` | 修正请求体 |
+| 400 | `invalid JSON body` / `missing level (0..1)` / `missing param id` / `missing mode` / `unsupported l3d format_version: X` / `glb missing: X` / `not a valid glb: X` / `zip contains neither a .model3.json nor a l3d manifest.json` / `unknown mode: X` / `blink only supported for red/green/blue/color` / `color mode needs rgb:[r,g,b] (0..255) or color:"#rrggbb"` / `custom mode needs leds: [...]` / `leds[i].id out of range 1..18` | 修正请求体 |
 | 403 | 内置模型删除 | 不可操作 |
 | 404 | `model not found: X` / `motion group not found: X` / `no route: X` / `no light route: X` | 核对名称与路由 |
 | 405 | （带 `Allow` 头） | 换用允许的方法 |
-| 409 | `model already exists` / `model is loaded, select another first` | 先删后传 / 先切走再删 |
+| 409 | `model already exists` / `model is loaded, select another first` / `current model is not l3d` / `current model is l3d; live2d control ... unavailable` | 先删后传 / 先切走再删 / 用对类型的控制端点 |
 | 503 | `renderer not ready, retry later` / `no model loaded` / `camera open failed` / `no camera on device` / `camera warming up` / `microphone start failed` / `zhcctrl unavailable: ...` | 稍后重试或检查设备能力 |

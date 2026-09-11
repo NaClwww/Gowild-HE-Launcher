@@ -11,6 +11,7 @@ import android.content.Context;
 import android.util.Log;
 
 import com.live2d.demo.minimum.control.ModelRepository;
+import com.live2d.demo.minimum.l3d.L3dScene;
 import com.live2d.sdk.cubism.framework.math.CubismMatrix44;
 
 /**
@@ -30,10 +31,32 @@ public class LAppMinimumLive2DManager {
 
     // ---- 供控制面线程无锁读取的状态镜像（GL 线程写入） ----
     private static volatile String s_currentModelName;
+    private static volatile String s_currentType = "live2d";   // "live2d" | "l3d"
     private static volatile String s_lastError;
+    private static volatile String s_playingAnim;
+    private static volatile boolean s_playingLoop = true;
+    private static volatile float s_playingSpeed = 1f;
 
     public static String peekCurrentModel() {
         return s_currentModelName;
+    }
+
+    /** 当前上屏模型类型："live2d" | "l3d"。 */
+    public static String peekCurrentType() {
+        return s_currentType;
+    }
+
+    /** 当前播放中的 l3d 动作名（无则 null）。 */
+    public static String peekPlayingAnim() {
+        return s_playingAnim;
+    }
+
+    public static boolean peekPlayingLoop() {
+        return s_playingLoop;
+    }
+
+    public static float peekPlayingSpeed() {
+        return s_playingSpeed;
     }
 
     public static String peekLastError() {
@@ -41,7 +64,8 @@ public class LAppMinimumLive2DManager {
     }
 
     /**
-     * 按名字加载模型：名字经 ModelRepository 解析（内置 assets 或外部存储）。
+     * 按名字加载模型：名字经 ModelRepository 解析（内置 assets 或外部存储），
+     * 类型按 Descriptor.type 分流 Live2D / l3d 渲染管线。
      * 必须在 GL 线程调用。
      */
     public void loadModel(String name) {
@@ -51,18 +75,60 @@ public class LAppMinimumLive2DManager {
             s_lastError = "model not found: " + name;
             return;
         }
+        if ("l3d".equals(d.type)) {
+            load3d(d);
+        } else {
+            loadLive2d(d, name);
+        }
+    }
+
+    private void load3d(ModelRepository.Descriptor d) {
+        try {
+            L3dScene old = scene3d;
+            LAppMinimumModel oldL2d = model;
+            LAppMinimumDelegate.getInstance().getTextureManager().releaseAll();
+
+            L3dScene created = L3dScene.create(d.homeDir);
+            scene3d = created;
+            model = null;
+            s_currentModelName = d.name;
+            s_currentType = "l3d";
+            s_playingAnim = created.getPlayingName();
+            s_playingLoop = true;
+            s_playingSpeed = 1f;
+            s_lastError = null;
+            if (oldL2d != null) {
+                oldL2d.deleteModel();
+            }
+            if (old != null) {
+                old.close();
+            }
+        } catch (Throwable t) {
+            Log.e("LAppMinimumLive2DManager", "l3d load failed: " + d.name, t);
+            s_lastError = "l3d load failed: " + t.getMessage();
+        }
+    }
+
+    private void loadLive2d(ModelRepository.Descriptor d, String name) {
         try {
             // 释放旧贴图显存后再装载新模型
             LAppMinimumDelegate.getInstance().getTextureManager().releaseAll();
 
+            L3dScene old3d = scene3d;
             LAppMinimumModel old = model;
             LAppMinimumModel created = new LAppMinimumModel(d.homeDir);
             created.loadAssets(d.homeDir, d.model3FileName);
             model = created;
+            scene3d = null;
             s_currentModelName = name;
+            s_currentType = "live2d";
+            s_playingAnim = null;
             s_lastError = null;
             if (old != null) {
                 old.deleteModel();
+            }
+            if (old3d != null) {
+                old3d.close();
             }
         } catch (Throwable t) {
             s_lastError = "load failed: " + t;
@@ -81,6 +147,20 @@ public class LAppMinimumLive2DManager {
     public void onUpdate() {
         int width = LAppMinimumDelegate.getInstance().getWindowWidth();
         int height = LAppMinimumDelegate.getInstance().getWindowHeight();
+
+        // l3d：独立渲染管线（自管投影/镜像/姿态，见 L3dScene）
+        L3dScene s3d = scene3d;
+        if (s3d != null) {
+            long now = System.nanoTime();
+            float dt = s_lastFrameNano == 0 ? 0f : (now - s_lastFrameNano) / 1e9f;
+            s_lastFrameNano = now;
+            s3d.update(Math.min(dt, 0.25f), width, height, poseX, poseY, poseZoom);
+            s_playingAnim = s3d.getPlayingName();
+            s_playingLoop = s3d.isLoop();
+            s_playingSpeed = s3d.getSpeed();
+            return;
+        }
+        s_lastFrameNano = 0;
 
         projection.loadIdentity();
 
@@ -119,7 +199,29 @@ public class LAppMinimumLive2DManager {
      * @param y 画面のy座標
      */
     public void onDrag(float x, float y) {
+        if (scene3d != null || model == null) return;   // l3d 触摸不做视线随动
         model.setDragging(x, FLIP_VERTICALLY ? -y : y);
+    }
+
+    // ---- l3d 动作控制（控制面经 delegate.post 在 GL 线程调） ----
+
+    /** 播放动作；模型非 l3d 或名字未知返回 false。 */
+    public boolean playAnimation(String name, boolean loop, float speed) {
+        L3dScene s3d = scene3d;
+        if (s3d == null) return false;
+        boolean ok = s3d.play(name, loop, speed);
+        if (ok) {
+            s_playingAnim = s3d.getPlayingName();
+            s_playingLoop = loop;
+            s_playingSpeed = s3d.getSpeed();
+        }
+        return ok;
+    }
+
+    public void stopAnimation() {
+        L3dScene s3d = scene3d;
+        if (s3d != null) s3d.stop();
+        s_playingAnim = null;
     }
 
     // ---- 视线/头随动（控制面线程调用，dragManager 本就跨线程喂） ----
@@ -213,12 +315,14 @@ public class LAppMinimumLive2DManager {
         return v < lo ? lo : (v > hi ? hi : v);
     }
 
-    /** 当前模型（可能为 null：尚未加载或加载失败）。 */
+    /** 当前 Live2D 模型（可能为 null：l3d 上屏中、尚未加载或加载失败）。 */
     public LAppMinimumModel currentModel() {
         return model;
     }
 
     private LAppMinimumModel model;
+    private L3dScene scene3d;                 // 非空 = 当前由 l3d 管线渲染
+    private long s_lastFrameNano;
 
     private final CubismMatrix44 viewMatrix = CubismMatrix44.create();
     private final CubismMatrix44 projection = CubismMatrix44.create();
