@@ -226,13 +226,14 @@ public class LAppMinimumDelegate {
     private static long s_fpsWindowStartMs = System.currentTimeMillis();
     private static int s_frameCount;
 
-    // ---- 原生内存看门狗 ----
-    // 摄像头 JPEG 编码每编一帧泄漏约 1~2KB native 堆（框架层 YuvImage.compressToJpeg，
-    // app 侧无法修补），拉流状态下约 50MB/h。本机 894MB RAM、内核 LMK 在 free<60MB 时
-    // 连 adj 0 的前台进程都杀（2026-09-11 实测累积到 674MB 被杀），所以到阈值主动干净
-    // 重启：代价是几秒重载，换掉"被内核杀掉后整夜没人拉起"。
-    // 注意：无客户端时编码已被 CameraController.framesWanted() 跳过，不产生泄漏，
-    // 因此这里的阈值只会在持续拉流（如 face_tracker 整夜跑）时才会被触发。
+    // ---- 原生内存看门狗（通用兜底，不是某个已知泄漏的补丁）----
+    // 背景：2026-09-11 这台设备上的 launcher 曾整夜被内核 LMK 杀掉（dmesg 实测
+    // adj 0 前台进程在 free<60MB 时照样被杀），根因是摄像头编码走
+    // YuvImage.compressToJpeg 每帧漏 ~2.5KB native 堆（约 58MB/h）。该根因已通过
+    // 换成 libjpeg-turbo 的 native 编码器修掉（见 CameraController / src/main/jni），
+    // 实测泄漏归零。这里保留看门狗是因为本机只有 894MB RAM 且要 24/7 常驻：
+    // 一旦将来再出现任何 native 泄漏，宁可主动重启几秒，也不要被内核杀掉后
+    // 整夜没人拉起。基线 RSS 约 45~70MB，300MB 阈值只有真泄漏才够得着。
     private static final long WATCHDOG_CHECK_INTERVAL_MS = 60_000L;
     private static final long WATCHDOG_RSS_LIMIT_KB = 300L * 1024L;
 

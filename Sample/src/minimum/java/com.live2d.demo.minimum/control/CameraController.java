@@ -1,6 +1,5 @@
 package com.live2d.demo.minimum.control;
 
-import android.graphics.Bitmap;
 import android.graphics.ImageFormat;
 import android.graphics.SurfaceTexture;
 import android.hardware.Camera;
@@ -246,10 +245,10 @@ public class CameraController {
         jpegQuality = Math.max(30, Math.min(95, q));
     }
 
-    private final JpegSink jpegSink = new JpegSink();
-    // 复用的转换缓冲（尺寸变化时重建）
-    private int[] argbBuf;
-    private Bitmap argbBitmap;
+    // native 编码器句柄（尺寸变化时重建）
+    private long jpegHandle;
+    private int convW;
+    private int convH;
     // 实拍画面上下颠倒，输出前翻转；左右是否镜像待定
     private static final boolean FLIP_V = true;
     private static final boolean FLIP_H = false;
@@ -353,6 +352,7 @@ public class CameraController {
             cam.release();
         } catch (Exception ignored) {
         }
+        releaseJpegEncoder();
         latestJpeg = null;
         Log.i(TAG, "camera closed");
     }
@@ -377,124 +377,33 @@ public class CameraController {
         try {
             int w = width;
             int h = height;
-            if (argbBuf == null || argbBuf.length != w * h) {
-                argbBuf = new int[w * h];
-                argbBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888);
+            if (jpegHandle == 0 || convW != w || convH != h) {
+                releaseJpegEncoder();
+                jpegHandle = Nv21JpegEncoder.create(w, h);
+                convW = w;
+                convH = h;
             }
-            // 镜像折进转换里，省掉一整趟 460KB 的 NV21 翻转
-            nv21ToArgb(data, argbBuf, w, h, FLIP_V, FLIP_H);
-            argbBitmap.setPixels(argbBuf, 0, w, 0, 0, w, h);
-            jpegSink.reset();
-            if (argbBitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, jpegSink)) {
-                latestJpeg = jpegSink.toByteArray();
-                frameSeq++;
+            if (jpegHandle != 0) {
+                byte[] jpeg = Nv21JpegEncoder.encode(jpegHandle, data, jpegQuality,
+                    FLIP_V, FLIP_H);
+                if (jpeg != null) {
+                    latestJpeg = jpeg;
+                    frameSeq++;
+                }
             }
-        } catch (Exception e) {
-            Log.w(TAG, "jpeg encode failed", e);
+        } catch (Throwable t) {
+            Log.w(TAG, "jpeg encode failed", t);
         }
         cam.addCallbackBuffer(data);
     }
 
-    // ---------------- NV21 → ARGB 转换 ----------------
-    // 为什么绕开 YuvImage：它的 compressToJpeg 内部那条 native YUV→RGB + SkBitmap
-    // 路径每次调用泄漏约 2.5KB native 堆（本机实测 58MB/h，拉流整夜累积到 674MB 后
-    // 被内核 LMK 在 adj 0 杀掉；StackOverflow 15696165 是同一问题的公开案例），
-    // 而框架内无法修补。改成「自己转 RGB + Bitmap.compress」后泄漏降到噪声
-    // （实测 0.065KB/帧）。注意 ScriptIntrinsicYuvToRGB 这条更省 CPU 的路在本机
-    // ROM 上是坏的（libRSCpuRef 里 SIGBUS），所以转换只能留在 Java 侧。
-
-    /** BT.601 全范围色度系数预乘成查表（下标 = 色度值，c = i - 128）。 */
-    private static final int[] R_V = new int[256];
-    private static final int[] G_U = new int[256];
-    private static final int[] G_V = new int[256];
-    private static final int[] B_U = new int[256];
-
-    static {
-        for (int i = 0; i < 256; i++) {
-            int c = i - 128;
-            R_V[i] = (359 * c) >> 8;
-            G_U[i] = -((88 * c) >> 8);
-            G_V[i] = -((183 * c) >> 8);
-            B_U[i] = (454 * c) >> 8;
+    private void releaseJpegEncoder() {
+        if (jpegHandle != 0) {
+            Nv21JpegEncoder.destroy(jpegHandle);
+            jpegHandle = 0;
         }
-    }
-
-    /** NV21 → ARGB_8888 并完成上下/左右镜像。逐像素查表（乘法已预乘）。 */
-    private static void nv21ToArgb(byte[] src, int[] dst, int w, int h, boolean fv, boolean fh) {
-        final int uvPlane = w * h;
-        final int halfW = w >> 1;
-        final int halfH = h >> 1;
-        for (int y = 0; y < h; y++) {
-            final int yRow = (fv ? (h - 1 - y) : y) * w;
-            final int cRow = uvPlane + (fv ? (halfH - 1 - (y >> 1)) : (y >> 1)) * w;
-            final int outRow = y * w;
-            for (int x = 0; x < w; x++) {
-                final int yy = src[yRow + (fh ? (w - 1 - x) : x)] & 0xff;
-                final int pair = cRow + ((fh ? (halfW - 1 - (x >> 1)) : (x >> 1)) << 1);
-                final int v = src[pair] & 0xff;       // NV21：V 在前
-                final int u = src[pair + 1] & 0xff;
-                dst[outRow + x] = 0xff000000
-                    | (clamp255(yy + R_V[v]) << 16)
-                    | (clamp255(yy + G_U[u] + G_V[v]) << 8)
-                    | clamp255(yy + B_U[u]);
-            }
-        }
-    }
-
-    private static int clamp255(int v) {
-        return v < 0 ? 0 : (v > 255 ? 255 : v);
-    }
-
-
-    /**
-     * 可复用的编码接收缓冲。原先每帧 new ByteArrayOutputStream(115KB) + toByteArray()
-     * 会在 ART large object space 里产生两个大对象垃圾，实测与 native 堆同步持续增长；
-     * 这里复用一个会自增容的 byte[]，把每帧的大对象分配压到只剩交接用的那一份快照。
-     */
-    private static final class JpegSink extends java.io.OutputStream {
-        private byte[] buf = new byte[1 << 16];
-        private int len;
-
-        void reset() {
-            len = 0;
-        }
-
-        int length() {
-            return len;
-        }
-
-        /** 交接快照：消费者（MjpegStream/快照接口）会跨帧持有，必须独立于复用缓冲。 */
-        byte[] toByteArray() {
-            byte[] out = new byte[len];
-            System.arraycopy(buf, 0, out, 0, len);
-            return out;
-        }
-
-        @Override
-        public void write(int b) {
-            ensure(1);
-            buf[len++] = (byte) b;
-        }
-
-        @Override
-        public void write(byte[] b, int off, int n) {
-            ensure(n);
-            System.arraycopy(b, off, buf, len, n);
-            len += n;
-        }
-
-        private void ensure(int extra) {
-            if (len + extra <= buf.length) {
-                return;
-            }
-            int cap = buf.length;
-            while (cap < len + extra) {
-                cap <<= 1;
-            }
-            byte[] grown = new byte[cap];
-            System.arraycopy(buf, 0, grown, 0, len);
-            buf = grown;
-        }
+        convW = 0;
+        convH = 0;
     }
 
     // ---------------- 扫码会话（摄像头互斥） ----------------
