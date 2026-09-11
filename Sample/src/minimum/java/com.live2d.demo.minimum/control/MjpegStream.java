@@ -1,8 +1,8 @@
 package com.live2d.demo.minimum.control;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 /**
  * MJPEG 单客户端流：把 CameraController 的最新 JPEG 帧包装成
@@ -12,6 +12,7 @@ import java.io.InputStream;
  */
 public class MjpegStream extends InputStream {
     private static final String BOUNDARY = "frame";
+    private static final java.nio.charset.Charset ASCII = StandardCharsets.US_ASCII;
     private static final long FRAME_TIMEOUT_NANOS = 5_000_000_000L;
     private static final int MAX_IDLE_ROUNDS = 3;
 
@@ -19,10 +20,17 @@ public class MjpegStream extends InputStream {
     private final long startGeneration;
     private long lastSeq = -1;
     private int idleRounds = 0;
-    private byte[] pending = null;
     private int pos = 0;
     private boolean closed = false;
     private boolean unregistered = false;
+
+    /**
+     * 复用的一条 multipart 记录缓冲。read() 总是在下一次 nextRecord() 之前把整条
+     * 拷进调用方的数组，所以这里可以安全复用——原先每帧 new ByteArrayOutputStream
+     * + toByteArray() 会往 ART large object space 里丢两个大对象垃圾。
+     */
+    private byte[] recordBuf = new byte[1 << 16];
+    private int recordLen = 0;
 
     public MjpegStream(CameraController cam) {
         this.cam = cam;
@@ -32,16 +40,14 @@ public class MjpegStream extends InputStream {
     @Override
     public int read(byte[] b, int off, int len) throws IOException {
         if (closed) return -1;
-        if (pending == null || pos >= pending.length) {
-            pending = nextRecord();
-            pos = 0;
-            if (pending == null) {
+        if (recordLen == 0 || pos >= recordLen) {
+            if (!nextRecord()) {
                 close();
                 return -1;
             }
         }
-        int n = Math.min(len, pending.length - pos);
-        System.arraycopy(pending, pos, b, off, n);
+        int n = Math.min(len, recordLen - pos);
+        System.arraycopy(recordBuf, pos, b, off, n);
         pos += n;
         return n;
     }
@@ -63,47 +69,53 @@ public class MjpegStream extends InputStream {
         super.close();
     }
 
-    /** 阻塞取下一帧记录；无新帧/摄像头被关/超时 → null（EOF）。 */
-    private byte[] nextRecord() {
+    /** 阻塞取下一帧记录；无新帧/摄像头被关/超时 → false（EOF）。 */
+    private boolean nextRecord() {
         long deadline = System.nanoTime() + FRAME_TIMEOUT_NANOS;
         while (!closed) {
             if (!cam.isOn()) {
                 // 代数变了说明摄像头在中途被真实关闭（显式关/看门狗）→ 流终止，
                 // 客户端重连时会走隐式开启路径重新拉起
-                if (cam.getGeneration() != startGeneration) return null;
-                if (!cam.turnOn(false)) return null;
+                if (cam.getGeneration() != startGeneration) return false;
+                if (!cam.turnOn(false)) return false;
             }
             long seq = cam.getFrameSeq();
             byte[] jpeg = cam.latestJpeg();
             if (jpeg != null && seq != lastSeq) {
                 lastSeq = seq;
                 idleRounds = 0;
-                return record(jpeg);
+                makeRecord(jpeg);
+                return true;
             }
             try {
                 Thread.sleep(50);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                return null;
+                return false;
             }
             if (System.nanoTime() > deadline) {
-                if (++idleRounds >= MAX_IDLE_ROUNDS) return null;
+                if (++idleRounds >= MAX_IDLE_ROUNDS) return false;
                 deadline = System.nanoTime() + FRAME_TIMEOUT_NANOS;
             }
         }
-        return null;
+        return false;
     }
 
-    private static byte[] record(byte[] jpeg) {
-        ByteArrayOutputStream bos = new ByteArrayOutputStream(jpeg.length + 96);
-        try {
-            bos.write(("--" + BOUNDARY + "\r\n" +
-                "Content-Type: image/jpeg\r\n" +
-                "Content-Length: " + jpeg.length + "\r\n\r\n").getBytes("US-ASCII"));
-            bos.write(jpeg);
-            bos.write("\r\n".getBytes("US-ASCII"));
-        } catch (IOException ignored) {
+    /** 把一帧 JPEG 包装成 boundary=frame 的记录写进复用缓冲，返回记录长度。 */
+    private void makeRecord(byte[] jpeg) {
+        String header = "--" + BOUNDARY + "\r\n"
+            + "Content-Type: image/jpeg\r\n"
+            + "Content-Length: " + jpeg.length + "\r\n\r\n";
+        byte[] head = header.getBytes(ASCII);
+        int need = head.length + jpeg.length + 2;
+        if (recordBuf.length < need) {
+            recordBuf = new byte[need];
         }
-        return bos.toByteArray();
+        System.arraycopy(head, 0, recordBuf, 0, head.length);
+        System.arraycopy(jpeg, 0, recordBuf, head.length, jpeg.length);
+        recordBuf[head.length + jpeg.length] = '\r';
+        recordBuf[head.length + jpeg.length + 1] = '\n';
+        recordLen = need;
+        pos = 0;
     }
 }

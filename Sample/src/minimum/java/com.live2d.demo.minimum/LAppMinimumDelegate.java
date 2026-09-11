@@ -119,6 +119,7 @@ public class LAppMinimumDelegate {
         }
 
         sampleFps();
+        checkMemoryWatchdog();
 
         // アプリケーションを非アクティブにする
         if (!isActive) {
@@ -224,6 +225,75 @@ public class LAppMinimumDelegate {
     private static volatile float s_fps;
     private static long s_fpsWindowStartMs = System.currentTimeMillis();
     private static int s_frameCount;
+
+    // ---- 原生内存看门狗 ----
+    // 摄像头 JPEG 编码每编一帧泄漏约 1~2KB native 堆（框架层 YuvImage.compressToJpeg，
+    // app 侧无法修补），拉流状态下约 50MB/h。本机 894MB RAM、内核 LMK 在 free<60MB 时
+    // 连 adj 0 的前台进程都杀（2026-09-11 实测累积到 674MB 被杀），所以到阈值主动干净
+    // 重启：代价是几秒重载，换掉"被内核杀掉后整夜没人拉起"。
+    // 注意：无客户端时编码已被 CameraController.framesWanted() 跳过，不产生泄漏，
+    // 因此这里的阈值只会在持续拉流（如 face_tracker 整夜跑）时才会被触发。
+    private static final long WATCHDOG_CHECK_INTERVAL_MS = 60_000L;
+    private static final long WATCHDOG_RSS_LIMIT_KB = 300L * 1024L;
+
+    private static void checkMemoryWatchdog() {
+        long now = System.currentTimeMillis();
+        if (now - s_watchdogLastCheckMs < WATCHDOG_CHECK_INTERVAL_MS) {
+            return;
+        }
+        s_watchdogLastCheckMs = now;
+        long rssKb = s_rssKb = readRssKb();
+        if (rssKb <= WATCHDOG_RSS_LIMIT_KB) {
+            return;
+        }
+        Log.w("[APP]", "rss " + (rssKb / 1024) + "MB > " + (WATCHDOG_RSS_LIMIT_KB / 1024)
+            + "MB（摄像头编码 native 泄漏），主动重启进程");
+
+        // 先挂一次性闹钟再退出：startActivity 请求已交到 AMS，本进程消失后照样开新进程
+        Activity a = s_instance != null ? s_instance.activity : null;
+        if (a != null) {
+            try {
+                android.app.AlarmManager am = (android.app.AlarmManager)
+                    a.getSystemService(Activity.ALARM_SERVICE);
+                android.content.Intent i = new android.content.Intent(a, MainActivityMinimum.class);
+                i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                am.set(android.app.AlarmManager.RTC, System.currentTimeMillis() + 800,
+                    android.app.PendingIntent.getActivity(a, 0, i,
+                        android.app.PendingIntent.FLAG_UPDATE_CURRENT));
+            } catch (Throwable t) {
+                Log.e("[APP]", "restart alarm failed", t);
+            }
+        }
+        System.exit(0);
+    }
+
+    /** /proc/self/statm 第 2 字段 = 常驻页数；与 AMS/LMK 报的 RSS 同口径。 */
+    private static long readRssKb() {
+        java.io.BufferedReader r = null;
+        try {
+            r = new java.io.BufferedReader(new java.io.FileReader("/proc/self/statm"));
+            String[] fields = r.readLine().trim().split("\\s+");
+            return Long.parseLong(fields[1]) * 4L;
+        } catch (Throwable t) {
+            return -1;
+        } finally {
+            if (r != null) {
+                try {
+                    r.close();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    /** 当前进程 RSS（kB），控制面 /api/status 暴露以便观察泄漏斜率。 */
+    public static long peekRssKb() {
+        return s_rssKb;
+    }
+
+    private static long s_watchdogLastCheckMs = System.currentTimeMillis();
+    private static volatile long s_rssKb;
 
     private final Queue<Runnable> commandQueue = new ConcurrentLinkedQueue<Runnable>();
 

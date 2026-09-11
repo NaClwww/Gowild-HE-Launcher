@@ -578,6 +578,8 @@ public class ControlServer extends NanoHTTPD {
         if (err != null) o.put("last_error", err);
         o.put("fps", (double) LAppMinimumDelegate.peekFps());
         o.put("uptime_s", (double) LAppMinimumDelegate.peekUptimeSeconds());
+        long rssKb = LAppMinimumDelegate.peekRssKb();
+        if (rssKb > 0) o.put("rss_mb", (double) rssKb / 1024.0);
         CameraController cam = CameraController.get();
         o.put("camera", new JSONObject()
             .put("available", cam.ensureProbed())
