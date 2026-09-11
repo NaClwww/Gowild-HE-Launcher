@@ -4,6 +4,39 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)。
 
+## [0.8] - 2026-09-11
+
+### Added
+
+* `/api/light` 舞台灯控制面（机身 18 颗 LED，SN3218 驱动；与 GL 渲染无关）。
+  * `LightController`：连系统守护 socket `/dev/socket/zhcctrl`，依次写握手 `zhc_client_ctrl`、`LEDInit`，之后 `LEDA,<灯号>,<亮度>,...` 下发；进程内保持**一条长连接**（守护每接受一个连接起一个 pthread 且不回收已断开的 fd，故不反复连），写失败自动重连一次；所有写操作串行，闪烁定时走专用 HandlerThread。
+  * 模式 `off` / `stage`（18 颗分段全亮）/ `red` / `green` / `blue` / `color`（任意色）/ `custom`（逐灯 1..18、亮度 0..255）；`blink` 在**设备端** 1s 交替亮灭（带 generation 防重入，避免重启闪烁时留下两条定时链）；三色 `brightness` 与舞台 `stage_a`/`stage_b` 可调。`mode` 为必填（无"保持当前"的省略语义）。
+  * `color` 模式：`rgb:[r,g,b]` 或 `color:"#rrggbb"`/`"#rgb"` 混三色通道，`brightness` 当总调光系数（默认 255 = 不缩放）；`blink` 同样可用。状态里加 `rgb`，因守护是**逐通道更新**，本地按通道累积跟踪（`custom` 未提及的通道保持原值），使 `rgb` 尽量等于设备实际电平。
+  * 舞台灯亮度档位读 `/sys/class/zhc_version/hardware_version`（对齐 voice 的 `VoiceApp`：`==2` → 7/40，否则 10/45；文件不存在时默认 `3` → 10/45，本机即此情形）。
+  * `GET /api/status` 增加 `light` 摘要。
+* `tools/light_rainbow.py`：Mac 侧刷色脚本（HSV 匀速旋转色相 → `POST /api/light {"mode":"color","rgb":[...]}`）。单条 keep-alive 连接（高频刷色不堆 TIME_WAIT）、默认 15Hz、Ctrl-C 退出自动关灯；可 `--hue-min/--hue-max` 限定色域、`--duration` 限时、`--brightness/--saturation` 调节。实测 15Hz 稳定下发 60 条/4s，守护侧无报错；连不上时给出 adb forward / 息屏两条自查提示。
+* `docs/API.md` v0.5：新增 §8 舞台灯（含 SELinux 依赖、守护 fd 泄漏两条警告、灯不亮排查顺序），后续章节顺延；概述能力表补齐此前漏掉的「语音采集」与新增的「舞台灯」两行；编排示例补灯光情态时序；错误码速查补灯光相关文案。
+
+### Fixed
+
+* **`off` 没把暖白舞台环关掉**。原先 `off` 发的是 `LEDA,12,0,15,0,18,0`——只有三色通道，照抄了出厂 voice `closeLED` 的语义（暖白环是常亮氛围灯、状态机只管三色）。用户说“关灯”时看到的却是暖白环继续亮。现改为发 18 路全 0（`LEDA,1,0,...,18,0`），`off` = 真·全灭；闪烁的“灭”相位仍只关三色（闪灯不该动暖白环）。
+* 状态新增 `ring_on`（暖白环开关，本地跟踪）：`stage` 依档位置位、`off` 置 false、三色模式不动它、`custom` 碰过暖白灯则无法断言——**不确定时该字段缺省**，不猜。文档补“两组灯的关系”对照表（哪个模式动哪组）。
+
+### 研究（逆向修正，无代码）
+
+* 修正此前逆向文档对连接方式的描述：`zhcctrl` 的 socket 是**文件系统路径 `/dev/socket/zhcctrl`**（init 建、经 `ANDROID_SOCKET_` 把 fd 交给守护），**不是抽象命名空间**。voice 里 `LocalSocketAddress("zhcctrl", Namespace.RESERVED)` 的 `RESERVED` 语义是"保留 socket 目录"即 `/dev/socket/<name>`，与 `Namespace.FILESYSTEM` + 绝对路径等价——两条实测都连通，而 `FILESYSTEM` + 相对名 `"zhcctrl"` 报 `No such file or directory`。
+* 守护**支持多客户端并发**（每次连接日志 `accepted ok , create pthread`），故与 voice 等其它控制方并存不会互斥（以最后一次写入为准）；但它接受后不回收已断开的 fd，`/proc/net/unix` 会累积已连接条目。
+* 可连性依赖 **SELinux `Permissive`**：策略对 `untrusted_app` 写 `socket_device:sock_file` 与 `connectto init:unix_stream_socket` 均是 `denied`（avc 有记录），仅因本机 permissive 才放行。换 enforcing 固件会被拦。
+
+### Verified
+
+* 真机（C2-CMCC）：app（`untrusted_app` 域）连接守护成功，守护日志齐全 —— `accepted ok , create pthread` / `CLIENT Verification Success 15  15` / `libLedBreath: led Init ok`。
+* `GET/POST /api/light` 全模式与负向用例实测通过：未知/缺失 mode、`stage`+`blink`、`custom` 缺 `leds`、id/level 越界、坏 JSON 均 `400`；`DELETE` `405`（带 `Allow`）、`/api/light/foo` `404`。闪烁 3s 内 `seq` 走 3 拍（4→7），符合 1s 交替节奏。
+* `color` 模式实测：`rgb:[255,120,0]` 原值下发；`#00ff80` + `brightness:128` → `rgb` 回读 `[0,128,64]`（缩放正确）；`#f80` 短写法 → `[255,136,0]`；`color` 缺 rgb/color、rgb 长度非 3、通道越界、hex 非法均 `400`。`custom` 只发 `{"id":12,200}` 再发 `{"id":15,77}`，`rgb` 依次为 `[200,0,0]`、`[200,77,0]`，通道累积跟踪符合预期。
+* **物理点亮由用户目测确认**（`stage` 生效，2026-09-11）：协议层由守护日志证实，物理层由人眼确认。
+* `off` 语义修正后实测：`stage` → `ring_on:true`；`color` → 环不动（仍 true）；`off` → `ring_on:false` 且 `rgb:[0,0,0]`；进程刚起时 `ring_on` 缺省（不猜）。
+* 注：曾试图用机身摄像头做客观验证，失败——其自动曝光/白平衡持续抖动（同状态相邻帧 U/V 漂 ±4、亮度漂 ±20）盖过了灯的贡献，「灭/蓝/灭/红」交替的色度方向对得上但不可复现。以后要验灯别走摄像头这条路。
+
 ## [0.7] - 2026-09-10
 
 ### Fixed

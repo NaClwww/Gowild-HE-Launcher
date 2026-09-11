@@ -60,6 +60,10 @@ public class ControlServer extends NanoHTTPD {
             return camera(uri, s, method);
         }
 
+        if (uri.startsWith("/api/light")) {
+            return light(uri, s, method);
+        }
+
         ModelRepository repo = ModelRepository.get(LAppMinimumDelegate.getInstance().getActivity());
 
         if (uri.equals("/api/models")) {
@@ -262,6 +266,44 @@ public class ControlServer extends NanoHTTPD {
             .put("frame_seq", cam.getFrameSeq());
         if (cam.getLastError() != null) o.put("last_error", cam.getLastError());
         return ok(o);
+    }
+
+    /**
+     * /api/light：机身 18 颗舞台灯（系统守护 zhcctrl 驱动，与 GL 渲染无关）。
+     * GET → 状态；POST → {"mode":"off|stage|red|green|blue|color|custom", "blink":bool,
+     *                      "brightness":0..255, "stage_a","stage_b":0..255,
+     *                      "rgb":[r,g,b] 或 "color":"#rrggbb"（color 模式，亮度当总调光）,
+     *                      "leds":[{"id":1..18,"level":0..255}, ...]（custom）}
+     */
+    private Response light(String uri, IHTTPSession s, Method method) throws Exception {
+        if (!uri.equals("/api/light")) {
+            return json(404, err("no light route: " + uri + " (available: /api/light)"));
+        }
+        LightController light = LightController.get();
+
+        if (method == Method.GET) {
+            light.ensureProbed();
+            return ok(light.statusJson());
+        }
+        if (method == Method.POST) {
+            JSONObject in;
+            try {
+                in = new JSONObject(readBody(s));
+            } catch (Exception e) {
+                return json(400, err("invalid JSON body"));
+            }
+            LightController.Spec spec;
+            try {
+                spec = LightController.parseSpec(in, light.currentSpec());
+            } catch (IllegalArgumentException e) {
+                return json(400, err(e.getMessage()));
+            }
+            if (!light.apply(spec)) {
+                return json(503, err(light.getLastError() != null ? light.getLastError() : "light unavailable"));
+            }
+            return ok(light.statusJson());
+        }
+        return methodNotAllowed("GET, POST");
     }
 
     private Response select(String name, ModelRepository repo) throws Exception {
@@ -584,6 +626,10 @@ public class ControlServer extends NanoHTTPD {
         o.put("camera", new JSONObject()
             .put("available", cam.ensureProbed())
             .put("on", cam.isOn()));
+        LightController light = LightController.get();
+        o.put("light", new JSONObject()
+            .put("available", light.ensureProbed())
+            .put("mode", light.getMode()));
         return ok(o);
     }
 

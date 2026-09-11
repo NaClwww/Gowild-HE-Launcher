@@ -2,10 +2,10 @@
 
 | | |
 |---|---|
-| **文档版本** | 0.4 |
-| **更新日期** | 2026-09-09 |
+| **文档版本** | 0.5 |
+| **更新日期** | 2026-09-11 |
 | **服务端口** | `8900`（HTTP，设备端常驻，随 app 前台启停） |
-| **实测环境** | la0920 智能音箱 · Android 5.1.1 (API 22) · armeabi-v7a |
+| **实测环境** | la0920 智能音箱 · Android 5.1.1 (API 22) · armeabi-v7a · 型号 C2-CMCC |
 | **实现** | NanoHTTPD 2.3.1，`Sample/src/minimum/java/com.live2d.demo.minimum/control/` |
 
 本文档是 `live2d_luncher` 设备端 HTTP 控制面的完整参考。所有端点均在真机实测通过。
@@ -21,11 +21,12 @@
 5. [模型资产 `/api/models`](#5-模型资产)
 6. [运行时控制 `/api/control/*`](#6-运行时控制)
 7. [摄像头 `/api/camera`](#7-摄像头)
-8. [语音采集 `/api/voice/*`](#8-语音采集-apivoice)
-9. [端到端编排示例](#9-端到端编排示例)
-10. [运维注意事项](#10-运维注意事项)
-11. [已知限制](#11-已知限制)
-12. [路线图](#12-路线图)
+8. [舞台灯 `/api/light`](#8-舞台灯-apilight)
+9. [语音采集 `/api/voice/*`](#9-语音采集-apivoice)
+10. [端到端编排示例](#10-端到端编排示例)
+11. [运维注意事项](#11-运维注意事项)
+12. [已知限制](#12-已知限制)
+13. [路线图](#13-路线图)
 - [附录 A：错误码速查](#附录-a错误码速查)
 
 ---
@@ -40,10 +41,12 @@
 
 | 资源组 | 路由前缀 | 能力 |
 |---|---|---|
-| 系统状态 | `/api/status` | app 版本、当前模型、实测 FPS、运行时长、摄像头摘要 |
+| 系统状态 | `/api/status` | app 版本、当前模型、实测 FPS、运行时长、摄像头与舞台灯摘要 |
 | 模型资产 | `/api/models` | 查询 / 上传（zip）/ 选择上屏 / 删除，内置+外置双源 |
 | 运行时控制 | `/api/control/*` | 姿态、身体动作、面部表情、参数直控、口型、视线随动、待机策略 |
 | 摄像头 | `/api/camera` | 开关控制、MJPEG 实时流、单帧快照 |
+| 舞台灯 | `/api/light` | 开关、三色常亮 / 闪烁、舞台全亮分段亮度、逐灯直控 |
+| 语音采集 | `/api/voice/*` | 麦克风原始 PCM 上行，供 Mac 侧 ASR |
 
 ## 2. 接入
 
@@ -60,12 +63,12 @@ BASE=http://<设备IP>:8900
 
 ### 2.2 鉴权
 
-当前版本**无鉴权**，局域网内明文开放。务必只在与设备同网段的可信环境使用；token 鉴权在路线图中（见 §11）。
+当前版本**无鉴权**，局域网内明文开放。务必只在与设备同网段的可信环境使用；token 鉴权在路线图中（见 §12、§13）。
 
 ### 2.3 前置条件
 
 - 设备屏幕必须点亮：**息屏触发 `onStop`，HTTP 服务随之停止**。调试前先 `adb shell input keyevent KEYCODE_WAKEUP`。
-- 厂商魔改 adbd 的挑战认证过期时（shell 报 `Who are you ? (O_O)???`），重跑 `calc_adbd_auth.py` 后**必须重建 `adb forward`**（见 §9）。
+- 厂商魔改 adbd 的挑战认证过期时（shell 报 `Who are you ? (O_O)???`），重跑 `calc_adbd_auth.py` 后**必须重建 `adb forward`**（见 §11）。
 
 ## 3. 通用约定
 
@@ -100,7 +103,7 @@ BASE=http://<设备IP>:8900
 
 - 凡涉及 `y` 的字段（pose / lookat）：**`y+` 为实体屏向上**。设备投影光路上下颠倒已在应用内镜像补偿，调用方按正常直觉传值即可。
 - `lookat` 的 x/y 为归一化坐标 `-1..1`；`pose` 的 x/y 为逻辑坐标位移 `±2`。
-- 注意：`adb screencap` 截图所见为 framebuffer 原始方向（上下颠倒），与实体屏相反；验证画面以实体屏为准（见 §9）。
+- 注意：`adb screencap` 截图所见为 framebuffer 原始方向（上下颠倒），与实体屏相反；验证画面以实体屏为准（见 §11）。
 
 ## 4. 系统状态
 
@@ -115,7 +118,8 @@ BASE=http://<设备IP>:8900
   "model": "21miku",
   "fps": 23.41,
   "uptime_s": 5,
-  "camera": { "available": true, "on": false }
+  "camera": { "available": true, "on": false },
+  "light": { "available": true, "mode": "off" }
 }
 ```
 
@@ -128,6 +132,7 @@ BASE=http://<设备IP>:8900
 | `fps` | number | 实测渲染帧率（1s 滑动窗口） |
 | `uptime_s` | number | 进程运行秒数 |
 | `camera` | object | 摄像头摘要（详见 §7） |
+| `light` | object | 舞台灯摘要（详见 §8） |
 
 ## 5. 模型资产
 
@@ -200,7 +205,7 @@ curl -X POST "$BASE/api/models/21miku/select"
 
 - **异步**（202）：GL 线程解析 moc3 + 上传贴图，实测 **2~2.5s** 完成上屏；期间画面停留在旧模型最后一帧，无黑屏。以 `/api/status` 的 `model` 变化为准。
 - 选中项**持久化**：重启 app 自动加载。
-- 切换语义：**姿态（pose）保留**；动作 / 表情 / 参数直控 / 口型等临场状态清空（新模型不继承）；待机策略回到默认 `on`（见 §10）。
+- 切换语义：**姿态（pose）保留**；动作 / 表情 / 参数直控 / 口型等临场状态清空（新模型不继承）；待机策略回到默认 `on`（见 §11）。
 
 | 状态码 | 场景 |
 |---|---|
@@ -418,7 +423,121 @@ curl -s -o snap.jpg "$BASE/api/camera/frame"   # 200 → image/jpeg
 
 > ⚠️ 画面为传感器原生方向（HAL `orientation=180`），服务端不做旋转/镜像；需要正向画面由 Mac 侧处理。无音频轨。
 
-## 8. 语音采集 `/api/voice/*`
+## 8. 舞台灯 `/api/light`
+
+机身 18 路 LED（SN3218 驱动）的控制面。**不依赖 GL 渲染**，与 Live2D、摄像头、麦克风并行工作。
+
+18 路分两组：**15 颗暖白“舞台环”**（灯号 1-9、10/11/13/14/16/17）与 **3 颗彩色通道**（12=红、15=绿、18=蓝）。哪个模式动哪组见 §8.2 末尾的对照表——“关灯”用 `off`（全灭），三色模式不会碰暖白环。
+
+链路：本 app ──本地 socket `/dev/socket/zhcctrl`──▶ 系统守护 `/system/bin/zhcctrl` ──▶ SN3218。守护是 init 起的常驻进程，不随 app 生命周期；原本由出厂 voice 的 `LEDManager` 独占控制（该 app 在本机已禁用），本控制面以同一协议接管。
+
+**生命周期**：进程内保持**一条长连接**（连接后先握手 `zhc_client_ctrl`，再 `LEDInit`）；灯光状态由守护保持，**app 退后台 / 被停不会关灯**，也没有空闲自动熄灭。守护支持多客户端并发（每连接起一个线程），所以即便 voice 重新启用也不会互相拒绝——两边都能下发，以最后一次写入为准。
+
+### 8.1 `GET /api/light` — 状态
+
+```json
+{
+  "available": true,
+  "connected": true,
+  "mode": "off",
+  "blink": false,
+  "brightness": 150,
+  "rgb": [0, 0, 0],
+  "ring_on": true,
+  "stage_levels": { "a": 10, "b": 45 },
+  "hardware_version": 3,
+  "led_count": 18,
+  "color_channels": { "red": 12, "green": 15, "blue": 18 },
+  "seq": 11
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `available` | 守护 socket 可连（首次 GET 会顺带建立连接，故耗时略高） |
+| `connected` | 当前长连接是否活着；写失败会自动重连一次 |
+| `mode` | 当前模式：`off` / `stage` / `red` / `green` / `blue` / `color` / `custom` |
+| `blink` | 是否正在闪烁（设备端 1s 交替，见 8.2） |
+| `brightness` | `red`/`green`/`blue` 下是该通道亮度（默认 150）；`color` 下是总调光系数（默认 255） |
+| `rgb` | 三色通道当前电平 `[r,g,b]`。守护是**逐通道更新**（只改命令里提到的灯），故本地累积跟踪：`custom` 里没提到的通道保持上一次的值 |
+| `ring_on` | 15 颗暖白"舞台环"的开关（本地跟踪）：`stage` 依档位置位、`off` 置 `false`、三色模式不动它、`custom` 碰过暖白灯则无法断言。**不确定时该字段缺省**（进程刚起、或 `custom` 部分写之后） |
+| `stage_levels` | 舞台模式的“1-9 段 / 其余段”亮度档（按硬件版本自动选，见下） |
+| `hardware_version` | 读 `/sys/class/zhc_version/hardware_version`；文件不存在时取默认 `3`（与 voice 的 `VoiceApp` 一致），`==2` 走另一套舞台亮度 |
+| `led_count` | 灯数（18） |
+| `color_channels` | 三色通道灯号：12=红、15=绿、18=蓝 |
+| `seq` | 累计下发命令数（单调递增） |
+| `last_error` | 仅在连接/写入异常时出现 |
+
+### 8.2 `POST /api/light` — 设置
+
+`mode` **必填**（无“保持当前”的省略语义，状态自描述，便于对账）。
+
+```bash
+# 全灭（18 路全 0，含 15 颗暖白舞台环）——"关灯"就用它
+curl -X POST -d '{"mode":"off"}' "$BASE/api/light"
+
+# 舞台灯全亮（1-9 段 + 10/11/13/14/16/17 段，三色通道关闭）
+curl -X POST -d '{"mode":"stage"}' "$BASE/api/light"
+
+# 舞台灯改档（分段亮度 0..255；缺省沿用硬件版本档位）
+curl -X POST -d '{"mode":"stage","stage_a":7,"stage_b":40}' "$BASE/api/light"
+
+# 三色常亮（默认亮度 150）
+curl -X POST -d '{"mode":"red"}'   "$BASE/api/light"
+curl -X POST -d '{"mode":"blue","brightness":255}' "$BASE/api/light"
+
+# 任意颜色：rgb 数组 或 #rrggbb / #rgb 十六进制
+curl -X POST -d '{"mode":"color","rgb":[255,120,0]}'  "$BASE/api/light"   # 暖橙
+curl -X POST -d '{"mode":"color","color":"#00ff80"}'  "$BASE/api/light"   # 青绿
+curl -X POST -d '{"mode":"color","color":"#39c5bb"}'  "$BASE/api/light"   # 初音主题色（Crypton 官方的 Miku 青绿）
+curl -X POST -d '{"mode":"color","color":"#f80","brightness":60}' "$BASE/api/light"  # 短写法 + 调暗到 60/255
+
+# 闪烁：设备端 1s 交替“亮 / 灭”，直到下一条模式命令（颜色模式同样支持）
+curl -X POST -d '{"mode":"blue","blink":true}' "$BASE/api/light"
+curl -X POST -d '{"mode":"color","rgb":[255,0,60],"blink":true}' "$BASE/api/light"
+
+# 逐灯直控：id 1..18、level 0..255（可只发部分灯，未提及的灯保持原值）
+curl -X POST -d '{"mode":"custom","leds":[{"id":1,"level":255},{"id":12,"level":80}]}' "$BASE/api/light"
+```
+
+| 字段 | 默认 | 说明 |
+|---|---|---|
+| `mode` | 必填 | `off` / `stage` / `red` / `green` / `blue` / `color` / `custom` |
+| `blink` | `false` | 1s 交替闪烁；**仅点亮颜色的模式支持**（`red`/`green`/`blue`/`color`，其它返回 `400`） |
+| `brightness` | 150（`color` 为 255） | `red`/`green`/`blue`：该通道亮度；`color`：总调光系数，按 `值/255` 缩放 rgb。0..255 |
+| `rgb` / `color` | — | `color` 模式必填（二选一）：`rgb:[r,g,b]`，或 `color:"#rrggbb"`/`"#rgb"` |
+| `stage_a` / `stage_b` | 硬件档位 | 舞台模式两段亮度 0..255（仅 `stage` 有意义） |
+| `leds` | — | `custom` 必填，`[{"id":1..18,"level":0..255}, ...]` |
+
+- `200` + 最新状态；`400` 参数不合法（未知 mode、缺 `mode`、`blink` 用错模式、`custom` 缺 `leds`、id/level 越界、JSON 不合法）；`503` socket 不可用（看 `last_error`）。
+- 切模式会停掉正在进行的闪烁；`blink:true` 自带“先亮”相位。
+- 亮度过低时肉眼几乎不可见（舞台默认档 `a=10` 只有 4% 占空），要醒目效果请调高 `stage_a`/`stage_b` 或用 `custom`。
+
+**两组灯的关系（重要，最容易踩）**：18 路分成两组，各模式的可见范围不同。
+
+| 组 | 灯号 | 谁的 |
+|---|---|---|
+| 暖白"舞台环" | 1-9、10、11、13、14、16、17（15 颗） | 只有 `stage` 会点亮它，`stage_a`/`stage_b` 定亮度 |
+| 三色通道 | 12=红、15=绿、18=蓝（3 颗） | `red`/`green`/`blue`/`color` 点亮，闪烁也在这组 |
+
+| 模式 | 暖白环 | 三色通道 |
+|---|---|---|
+| `off` | 灭 | 灭（**18 路全 0 = 真·全灭**） |
+| `stage` | 按 `stage_a`/`stage_b` 亮 | 灭 |
+| `red`/`green`/`blue`/`color` | **保持原状，不碰** | 按参数亮 |
+| `custom` | 由 `leds` 决定 | 由 `leds` 决定 |
+
+所以：**"关灯"一定用 `off`**。三色模式只动那 3 颗，暖白环亮着就会继续亮——这是照抄出厂 voice `closeLED`（只关三色）带来的坑，`off` 已按"整圈灭"实现；想要"暖白环亮着但不要颜色"就用 `stage`。
+
+- **关于"具体颜色"**：机身只有 3 颗彩色发光体（12/15/18），`color` 模式就是在混这三路的电平，所以能出任意色调，但它们是**三颗分离的灯**而非单个 RGB 灯珠——混色是空间相加，越饱和越会看出分离感；那 15 颗暖白灯**不能染色**。想要"整圈带色"目前做不到，但可以"暖白环 + 一点彩色点缀"，比如 `{"mode":"custom","leds":[{"id":1,"level":10},{"id":12,"level":200}]}`。
+
+> ⚠️ **可连性依赖 SELinux permissive**：本机 `adbd`/系统策略对 `untrusted_app` 连 `socket_device:sock_file` 是 `denied`（`avc` 有记录），仅因 `getenforce` = `Permissive` 才放行。**换到 enforcing 的固件这一路会被拦**（需在设备策略里放行，或改由 privileged 进程代理）。
+> ⚠️ 守护每接受一个连接会 spawn 一个线程且不回收已断开的 fd（`/proc/net/unix` 会累积已连接条目）。本实现只在进程内连一次并长期持有，不反复连。
+
+> 🛠 现成脚本：`tools/light_rainbow.py` —— 让彩色通道连续变色（HSV 匀速转色相 → `color` 模式）。
+> 支持限定色域（`--hue-min/--hue-max`，例如只在绿~青绿之间循环）、亮度/饱和度、限时运行，Ctrl-C 退出自动关灯。用法见脚本头部注释。
+
+## 9. 语音采集 `/api/voice/*`
 
 麦克风原始音频上行，供 Mac 侧 ASR。路由形如 `/api/voice/{name}/*`，`{name}` 为**采集源名**（当前仅 `mic`，后续新源在此扩展）。输出 **PCM16LE 单声道**，默认 16 kHz，8k~48k 可调。与 Live2D 渲染、摄像头并行互不影响。
 
@@ -489,7 +608,7 @@ curl -s "$BASE/api/voice/mic/stream" > asr.pcm     # 持续读取，Ctrl-C 停�
 - 消费不过来时丢**最旧**块保新块（`drops` 计数）；正常读取速率下实测稳态零丢块（4s 抓取 121,600 字节 @16 kHz，drops 无增长）。
 - `503`：无麦克风 / 开启失败。
 
-## 9. 端到端编排示例
+## 10. 端到端编排示例
 
 Mac 侧让模型"打招呼说话"的推荐时序：
 
@@ -517,7 +636,19 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 3. TTS 播放期间暂停读 /api/voice/mic/stream      # 防拾到本机外放
 ```
 
-## 10. 运维注意事项
+灯光随情态编排（状态灯：待机/聆听/说话/出错各一套）：
+
+```
+待机:  POST /api/light {"mode":"stage"}                       # 舞台灯常亮
+聆听:  POST /api/light {"mode":"blue"}                        # 蓝常亮
+说话:  POST /api/light {"mode":"blue","blink":true}            # 蓝闪（设备端 1s 交替）
+出错:  POST /api/light {"mode":"red","blink":true}
+收尾:  POST /api/light {"mode":"off"}                          # 或回 stage
+```
+
+> 注意：灯光状态是**设备端保持**的，与模型动作/口型不同步也不自动回落；每个情态结束都要显式下一条命令。
+
+## 11. 运维注意事项
 
 | 项 | 说明 |
 |---|---|
@@ -526,8 +657,9 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 | 息屏 | 触发 `onStop` → HTTP 服务停止。调试前 `adb shell input keyevent KEYCODE_WAKEUP`；桌面化（HOME + KEEP_SCREEN_ON）后根治 |
 | 性能基线 | 21miku ≈ 22-23 FPS，Hiyori ≈ 36 FPS（老 SoC）；摄像头开启对模型 FPS 无影响 |
 | 摄像头画面暗 | 摄像头无补光，夜间画面很暗属正常（无夜视模式） |
+| 灯不亮排查 | 顺序看：`GET /api/light` 的 `available`（false = socket 连不上，看 `last_error`）→ logcat 里守护是否回了 `accepted ok` / `CLIENT Verification Success 15  15` / `led Init ok`（收到即协议通）→ 灯本身（用 `{"mode":"custom","leds":[{"id":12,"level":255}]}` 单独点某一颗） |
 
-## 11. 已知限制
+## 12. 已知限制
 
 | 项 | 现状 |
 |---|---|
@@ -537,8 +669,11 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 | 呼吸 / 眨眼开关 | 未提供（常开） |
 | 摄像头方向 / 音频 | 传感器原生方向未旋转；无音频轨 |
 | 响应包裹 | 部分成功响应缺 `"ok":true`（以 HTTP 状态码为准） |
+| 舞台灯可连性 | 依赖 SELinux `Permissive`：策略对 `untrusted_app` 连该 socket 是 denied，仅 permissive 放行（见 §8 末尾） |
+| 舞台灯呼吸效果 | 守护的 `LEDB`/`libLedBreath` 通道未逆向出参数格式，未暴露（只做了常亮/闪烁/逐灯） |
+| 舞台灯物理验证 | 协议层已在真机证实（守护 accept + 握手 + `led Init ok`）；**"灯是否真的亮"未做客观验证**——唯一可用的传感器（摄像头）被自动曝光/白平衡抖动淹没，需人眼确认 |
 
-## 12. 路线图
+## 13. 路线图
 
 | 端点 | 内容 |
 |---|---|
@@ -546,6 +681,7 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 | `GET/PUT /api/config` | 口型权重、待机策略持久化、呼吸/眨眼开关、鉴权 token |
 | `POST /api/costume` | 换装（同布局贴图变体热切换 / Parts 开关，视模型资源而定） |
 | 事件上行 | 实体屏点击命中区域 → 通知 Mac 网关（WebSocket / 长轮询） |
+| `/api/light` 呼吸 | 逆向 `LEDB` 参数格式后补上呼吸/渐变（现仅常亮、闪烁、逐灯） |
 
 ---
 
@@ -553,9 +689,9 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 
 | 码 | 典型 `error` 文案 | 处置 |
 |---|---|---|
-| 400 | `invalid JSON body` / `missing level (0..1)` / `missing param id` | 修正请求体 |
+| 400 | `invalid JSON body` / `missing level (0..1)` / `missing param id` / `missing mode` / `unknown mode: X` / `blink only supported for red/green/blue/color` / `color mode needs rgb:[r,g,b] (0..255) or color:"#rrggbb"` / `custom mode needs leds: [...]` / `leds[i].id out of range 1..18` | 修正请求体 |
 | 403 | 内置模型删除 | 不可操作 |
-| 404 | `model not found: X` / `motion group not found: X` / `no route: X` | 核对名称与路由 |
+| 404 | `model not found: X` / `motion group not found: X` / `no route: X` / `no light route: X` | 核对名称与路由 |
 | 405 | （带 `Allow` 头） | 换用允许的方法 |
 | 409 | `model already exists` / `model is loaded, select another first` | 先删后传 / 先切走再删 |
-| 503 | `renderer not ready, retry later` / `no model loaded` / `camera open failed` / `no camera on device` / `camera warming up` / `microphone start failed` | 稍后重试或检查设备能力 |
+| 503 | `renderer not ready, retry later` / `no model loaded` / `camera open failed` / `no camera on device` / `camera warming up` / `microphone start failed` / `zhcctrl unavailable: ...` | 稍后重试或检查设备能力 |
