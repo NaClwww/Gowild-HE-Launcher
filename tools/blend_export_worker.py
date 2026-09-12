@@ -151,8 +151,14 @@ def main():
             print("[blend_export_worker] ERROR: no OBJECT slot in action " + action_name,
                   file=sys.stderr)
             sys.exit(2)
+        # 动作文件只保留骨架：移除全部网格对象后再导出（导出器按整个场景输出，
+        # 不移除会把网格/材质/贴图整份重复进每个动作文件；worker 每次调用独立
+        # 开 blend 且不保存，删除是安全的）。设备端按节点名绑定动画，网格节点
+        # 消失不影响。
+        for ob in [o for o in list(bpy.context.scene.objects) if o.type == "MESH"]:
+            bpy.data.objects.remove(ob)
         export_glb(out_path)
-        log("anim %s written: %s" % (action_name, out_path))
+        log("anim %s written (skeleton-only): %s" % (action_name, out_path))
         sys.exit(0)
 
     print("unknown mode: " + mode, file=sys.stderr)
