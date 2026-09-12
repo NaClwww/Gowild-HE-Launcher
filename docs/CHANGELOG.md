@@ -4,6 +4,20 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)。
 
+## [0.11] - 2026-09-12
+
+### Fixed
+
+* **表情运行时根因：`L3dGlb.readFloats` 的 sparse accessor 分支漏调 `applySparse`**。Blender 形态键形变量在 glTF 里编码为**纯 sparse accessor**（无基底 bufferView + indices/values 差分替换），原实现注释写着"全零 + 稀疏差分"却直接 `return new float[...]`——26 个形态键的形变量全部读成 0。权重通道解析、绑定、写入、蒙皮叠加全链路都正常，唯独叠加的是零向量 → 表情完全不可见（此前"没绑上"的直接原因）。修为全零基底 + `applySparse` 差分。
+* **导出侧表情烘焙两个 bug**（`tools/blend_export_worker.py`，同一症状的另一半）：
+  * 烘焙前 `shape_keys.animation_data_clear()` 清掉了驱动器 fcurve——表情链路"自定义属性（face_blink_L/R…）→ SCRIPTED 驱动器 → 形态键"的驱动器就住在 `shape_keys.animation_data.drivers` 里，清掉后按帧求值恒 0、烘焙出全零平线。删除该行（fcurve 与驱动器同通道时驱动器优先，不冲突）。
+  * 动作只挂骨架对象时 Face 网格对象的自定义属性不被动画化（驱动器输入恒定）→ 同样烘出平线；改为按动作槽位（`slot.name_display`）把动作挂到所有匹配对象。对象名剥 `.NNN` 后缀提前到绑定前（槽位记录的是原始对象名）。
+* **`morphDbg` 探针未声明导致编译失败**（上轮加日志时遗漏）；调试探针收敛为加载期一次性摘要：`L3dModel: loaded: ... morphMeshes=N morphTargets<=M`、`L3dClip: clip <名> bound=N weightsCh=K mesh=I`。worker 的逐帧烘焙探针 `bakeDbg` 默认关。
+
+### Verified
+
+* 真机：`eyes_closed_test`（eye_close 权重恒 1 的对照动作）截图确认双眼闭合仅余睫毛线；`eve_559010221_full_face` 连续帧口型闭↔张↔微张自然过渡；重载包后 48~50fps 无回归。测试动作已从设备包移除（manifest 原子更新），默认动作 `eve_559010221_full_face`。
+
 ## [0.10] - 2026-09-12
 
 ### Added
@@ -15,7 +29,7 @@
 
 ### Verified
 
-* 真机：动作 blend（同骨架 Miku_Eve_Rig + 3 动作）导出 → `eve_559010221`、`eve_559010221_full_face` 两个动作经新端点绑定成功（各 6.07s，201），包内动作清单 5 个；full_face 播放时眨眼/张嘴表情可见（连续截图面部形态变化）；基础动作无回归 50+fps；负向：testrig 动作（骨架 b1/b2/b3）绑 miku_eve → `400 animation targets unknown nodes (rig mismatch)`，文件与 manifest 未被污染。
+* 真机：动作 blend（同骨架 Miku_Eve_Rig + 3 动作）导出 → `eve_559010221`、`eve_559010221_full_face` 两个动作经新端点绑定成功（各 6.07s，201），包内动作清单 5 个；基础动作无回归 50+fps；负向：testrig 动作（骨架 b1/b2/b3）绑 miku_eve → `400 animation targets unknown nodes (rig mismatch)`，文件与 manifest 未被污染。（注：本轮"表情可见"的结论有误——权重通道虽绑定成功，但运行时 sparse accessor bug 使形变量全零，表情实际未生效，见 [0.11]。）
 
 ## [0.9] - 2026-09-12
 

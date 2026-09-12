@@ -10,6 +10,7 @@ final class L3dClip {
     static final int PATH_S = 2;
     static final int PATH_W = 3;                    // morph 权重（nc = 该 mesh target 数）
     private static final int[] PATH_N = {3, 4, 3};  // T/R/S 的分量宽度
+    static boolean clipDbg = true;                  // 装载期一行绑定摘要（默认开）
 
     final String name;
     final float durationS;
@@ -139,6 +140,17 @@ final class L3dClip {
         }
         if (bound == 0) {
             throw new L3dGlb.L3dException("no usable channels in clip " + name);
+        }
+        if (clipDbg) {
+            int tw = 0, twMesh = -1;
+            for (int c = 0; c < bound; c++) {
+                if (paths[c] == PATH_W) {
+                    tw++;
+                    twMesh = chanMesh[c];
+                }
+            }
+            android.util.Log.i("L3dClip", "clip " + name + " bound=" + bound
+                + " weightsCh=" + tw + (tw > 0 ? " mesh=" + twMesh : ""));
         }
         return new L3dClip(name, duration, java.util.Arrays.copyOf(targets, bound),
             java.util.Arrays.copyOf(paths, bound), java.util.Arrays.copyOf(ncs, bound),

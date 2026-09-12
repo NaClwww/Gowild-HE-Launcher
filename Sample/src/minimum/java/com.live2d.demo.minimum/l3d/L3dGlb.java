@@ -106,6 +106,13 @@ public final class L3dGlb {
                 throw new L3dException("readFloats: accessor " + accIndex + " is not FLOAT");
             }
             int elem = nc * 4;
+            if (!acc.has("bufferView")) {
+                // sparse accessor（Blender 形态键）：无基底 bufferView = 全零基底，
+                // 再叠 sparse 差分。漏 applySparse 会把所有形态键形变量读成 0。
+                float[] out = new float[n * nc];
+                applySparse(acc, out, n, nc);
+                return out;
+            }
             int bv = acc.getInt("bufferView");
             ByteBuffer b = view(bv, acc.optInt("byteOffset", 0), elem, n);
             float[] out = new float[n * nc];
@@ -120,11 +127,39 @@ public final class L3dGlb {
                     for (int c = 0; c < nc; c++) out[i * nc + c] = b.getFloat();
                 }
             }
+            applySparse(acc, out, n, nc);
             return out;
         } catch (L3dException e) {
             throw e;
         } catch (Exception e) {
             throw new L3dException("readFloats(" + accIndex + "): " + e);
+        }
+    }
+
+
+    /** glTF sparse accessor：按 indices 把 values 写入基底（替换语义）。 */
+    private void applySparse(JSONObject acc, float[] out, int n, int nc) throws L3dException {
+        JSONObject sparse = acc.optJSONObject("sparse");
+        if (sparse == null) return;
+        try {
+            JSONObject idx = sparse.getJSONObject("indices");
+            JSONObject val = sparse.getJSONObject("values");
+            int sc = sparse.getInt("count");
+            int idxCT = idx.getInt("componentType");
+            int idxE = idxCT == 5125 ? 4 : 2;
+            ByteBuffer ib = view(idx.getInt("bufferView"), idx.optInt("byteOffset", 0),
+                idxE, sc);
+            ByteBuffer vb = view(val.getInt("bufferView"), val.optInt("byteOffset", 0),
+                nc * 4, sc);
+            for (int i = 0; i < sc; i++) {
+                int bi = idxE == 4 ? ib.getInt() : ib.getShort() & 0xFFFF;
+                if (bi < 0 || bi >= n) throw new L3dException("sparse index out of range");
+                for (int c = 0; c < nc; c++) out[bi * nc + c] = vb.getFloat();
+            }
+        } catch (L3dException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new L3dException("applySparse: " + e);
         }
     }
 

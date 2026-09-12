@@ -110,6 +110,9 @@ final class L3dModel {
         SkinCache skinCache;                            // skinned 时非 null
         int material;
         int node;                                       // 静态网格用其全局矩阵
+        // morph targets 挂在 glTF primitive 层（不是 mesh 层！），POSITION 形变量
+        int targetCount;
+        float[][] morphTargets;
     }
 
     static final class Mesh {
@@ -315,28 +318,15 @@ final class L3dModel {
             JSONArray jPrims = jMeshes.getJSONObject(mi).getJSONArray("primitives");
             Mesh mesh = new Mesh();
             mesh.prims = new Primitive[jPrims.length()];
-            // morph targets（表情形态键）：只取 POSITION 形变量，NORMAL 忽略（unlit）
-            org.json.JSONArray jTargets = jMeshes.getJSONObject(mi).optJSONArray("targets");
-            int vc0 = glb.obj(
-                jPrims.getJSONObject(0).getJSONObject("attributes").getInt("POSITION"),
-                "accessors").getInt("count");
-            if (jTargets != null && jTargets.length() > 0) {
-                mesh.targetCount = jTargets.length();
-                mesh.morphTargets = new float[mesh.targetCount][];
-                for (int t = 0; t < mesh.targetCount; t++) {
-                    mesh.morphTargets[t] = glb.readFloats(
-                        jTargets.getJSONObject(t).getInt("POSITION"));
-                }
-                JSONArray jw = jMeshes.getJSONObject(mi).optJSONArray("weights");
-                mesh.morphDefaults = new float[mesh.targetCount];
-                if (jw != null) {
-                    for (int t = 0; t < mesh.targetCount && t < jw.length(); t++) {
-                        mesh.morphDefaults[t] = (float) jw.optDouble(t, 0);
-                    }
-                }
-                mesh.morphWeights = new float[mesh.targetCount];
-                mesh.activeScratch = new int[mesh.targetCount];
-            }
+            // mesh.weights = morph 默认权重（glTF 层级：weights 在 mesh、targets 在 primitive）
+            JSONArray jw = jMeshes.getJSONObject(mi).optJSONArray("weights");
+            int wn = jw != null ? jw.length() : 0;
+            // morphWeights 统一按 targetCount 展开（解析在 prim 循环里补齐；
+            // 这里先按 weights 长度占位，prim 循环后再校正）
+            mesh.morphDefaults = new float[wn];
+            for (int t = 0; t < wn; t++) mesh.morphDefaults[t] = (float) jw.optDouble(t, 0);
+            mesh.morphWeights = new float[wn];
+            mesh.activeScratch = new int[wn];
             int owner = -1;
             for (int n = 0; n < nodes.length; n++) {
                 if (nodes[n].mesh == mi) {
@@ -351,6 +341,18 @@ final class L3dModel {
                 pr.node = owner;
                 pr.material = jp.optInt("material", -1);
                 pr.skinned = attrs.has("JOINTS_0") && attrs.has("WEIGHTS_0") && skin != null;
+
+                // morph targets：primitive 层。只取 POSITION 形变量（NORMAL 忽略，unlit）
+                org.json.JSONArray jTargets = jp.optJSONArray("targets");
+                if (jTargets != null && jTargets.length() > 0) {
+                    pr.targetCount = jTargets.length();
+                    pr.morphTargets = new float[pr.targetCount][];
+                    for (int t = 0; t < pr.targetCount; t++) {
+                        pr.morphTargets[t] = glb.readFloats(
+                            jTargets.getJSONObject(t).getInt("POSITION"));
+                    }
+                    if (mesh.targetCount == 0) mesh.targetCount = pr.targetCount;
+                }
 
                 int vc = glb.obj(attrs.getInt("POSITION"), "accessors").getInt("count");
                 float[] pos = glb.readFloats(attrs.getInt("POSITION"));
@@ -453,6 +455,17 @@ final class L3dModel {
 
                 mesh.prims[pi] = pr;
             }
+            if (mesh.targetCount > mesh.morphWeights.length) {
+                int tc = mesh.targetCount;
+                float[] w2 = new float[tc];
+                System.arraycopy(mesh.morphWeights, 0, w2, 0, mesh.morphWeights.length);
+                mesh.morphWeights = w2;
+                float[] d2 = new float[tc];
+                System.arraycopy(mesh.morphDefaults, 0, d2, 0,
+                    Math.min(mesh.morphDefaults.length, tc));
+                mesh.morphDefaults = d2;
+                mesh.activeScratch = new int[tc];
+            }
             meshes[mi] = mesh;
         }
         if (!haveBounds) {
@@ -501,8 +514,16 @@ final class L3dModel {
         model.resetPose();
         model.updateGlobals();
         model.recomputeBounds(glb);
+        int morphMeshes = 0, morphTargets = 0;
+        for (Mesh m : meshes) {
+            if (m.targetCount > 0) {
+                morphMeshes++;
+                morphTargets = Math.max(morphTargets, m.targetCount);
+            }
+        }
         Log.i(TAG, "loaded: nodes=" + nodes.length + " meshes=" + meshes.length
             + " joints=" + (skin != null ? skin.joints.length : 0)
+            + " morphMeshes=" + morphMeshes + " morphTargets<=" + morphTargets
             + " skinning=cpu"
             + " bounds=[" + fmt(model.sceneMin) + " .. " + fmt(model.sceneMax) + "]");
         return model;
@@ -651,9 +672,9 @@ final class L3dModel {
                 final boolean clamp = clampRange > 0f;
                 final float cX = clampCenter[0], cY = clampCenter[1], cZ = clampCenter[2];
                 int o = 0;
-                final float[][] mT = mesh.morphTargets;
+                final float[][] mT = pr.morphTargets;
                 final float[] mW = mesh.morphWeights;
-                final int mN = mesh.activeN;
+                final int mN = pr.morphTargets != null ? mesh.activeN : 0;
                 for (int v = 0, p = 0, q = 0; v < vc; v++, p += 3, q += 4) {
                     float px = pos[p];
                     float py = pos[p + 1];
