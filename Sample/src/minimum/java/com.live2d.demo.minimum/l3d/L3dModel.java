@@ -71,6 +71,11 @@ final class L3dModel {
 
     // ---- CPU 蒙皮 ----
     private final float[] jointPalette;                 // 16*J 列主序（recomputeBounds 也用）
+    // 按需计算表：只有带权关节及其祖先链的全局矩阵影响渲染（miku_eve 96/375 带权、
+    // 120/379 节点需要），其余节点每帧跳过；topoOrder 保证父先于子
+    private boolean[] jointWeighted;                    // [skin.joints 下标]
+    private int[] topoNeeded;                           // 需要计算的节点拓扑序
+    private int[] topoParent;                           // 与 topoNeeded 对齐的父下标（-1=根）
 
     static final class Node {
         String name;
@@ -118,7 +123,8 @@ final class L3dModel {
 
     private L3dModel(Node[] nodes, int[] roots, Mesh[] meshes, Skin skin,
                      HashMap<String, Integer> byName, int[] matTex, float[] matColor,
-                     float[] minB, float[] maxB) {
+                     float[] minB, float[] maxB,
+                     boolean[] jointWeighted, int[] topoNeeded, int[] topoParent) {
         this.nodes = nodes;
         this.rootNodes = roots;
         this.meshes = meshes;
@@ -130,6 +136,9 @@ final class L3dModel {
         System.arraycopy(maxB, 0, sceneMax, 0, 3);
         int n = skin != null ? skin.joints.length : 0;
         this.jointPalette = new float[16 * n];
+        this.jointWeighted = jointWeighted;
+        this.topoNeeded = topoNeeded;
+        this.topoParent = topoParent;
     }
 
     float[] sceneMin() {
@@ -215,6 +224,7 @@ final class L3dModel {
 
         // 骨架（本仓管线单骨架约定）
         Skin skin = null;
+        boolean[] jointWeighted = null;                 // load 局部：带权关节标记
         JSONArray jSkins = j.optJSONArray("skins");
         if (jSkins != null && jSkins.length() > 0) {
             JSONObject js = jSkins.getJSONObject(0);
@@ -230,7 +240,11 @@ final class L3dModel {
                 throw new L3dGlb.L3dException("inverseBindMatrices truncated");
             }
             skin.inverseBind = ibm;
+            jointWeighted = new boolean[skin.joints.length];
         }
+        // 按需计算表（load 内局部，构造时传入实例）
+        int[] topoNeeded = null;
+        int[] topoParent = null;
 
         // 材质：只用 baseColorTexture / baseColorFactor（导出管线约定）
         JSONArray jMats = j.optJSONArray("materials");
@@ -307,6 +321,17 @@ final class L3dModel {
                     ? glb.readAttrib4(attrs.getInt("WEIGHTS_0"), true) : null;
 
                 if (pr.skinned) {
+                    // 标记带权关节（一次性；updateGlobals 只算这些关节及其祖先链）
+                    for (int v = 0; v < vc; v++) {
+                        for (int w = 0; w < 4; w++) {
+                            if (weight[v * 4 + w] > 0f) {
+                                int jIdx = (int) (joint[v * 4 + w] + 0.5f);
+                                if (jIdx >= 0 && jIdx < jointWeighted.length) {
+                                    jointWeighted[jIdx] = true;
+                                }
+                            }
+                        }
+                    }
                     // CPU 蒙皮：原始数据留在 Java 缓存，顶点每帧变换后进动态 VBO
                     SkinCache sc = new SkinCache();
                     sc.pos = pos;
@@ -394,8 +419,42 @@ final class L3dModel {
             }
         }
 
+        // 需要参与全局矩阵计算的节点 = 带权关节 ∪ 其全部祖先（构造拓扑序，父先于子）
+        if (skin != null) {
+            boolean[] nodeNeeded = new boolean[nodes.length];
+            for (int ji = 0; ji < skin.joints.length; ji++) {
+                if (!jointWeighted[ji]) continue;
+                int x = skin.joints[ji];
+                while (x >= 0 && !nodeNeeded[x]) {
+                    nodeNeeded[x] = true;
+                    x = nodes[x].parent;
+                }
+            }
+            // 真拓扑序（DFS 后序）：glTF 节点数组不保证父在下标上先于子，
+            // 按 arrOrder 直接过滤会在子先出现时用到未初始化的父矩阵
+            int[] emitState = new int[nodes.length];        // 0=未访问 1=栈中 2=完成
+            java.util.ArrayList<Integer> order = new java.util.ArrayList<Integer>();
+            java.util.HashMap<Integer, Integer> remap = new java.util.HashMap<Integer, Integer>();
+            for (int i = 0; i < nodes.length; i++) {
+                if (nodeNeeded[i]) {
+                    emitNeeded(i, nodeNeeded, nodes, emitState, order);
+                }
+            }
+            for (int i = 0; i < order.size(); i++) {
+                remap.put(order.get(i), i);
+            }
+            topoNeeded = new int[order.size()];
+            topoParent = new int[order.size()];
+            for (int i = 0; i < order.size(); i++) {
+                int ni = order.get(i);
+                topoNeeded[i] = ni;
+                Integer pp = remap.get(nodes[ni].parent);
+                topoParent[i] = pp != null ? pp : -1;
+            }
+        }
+
         L3dModel model = new L3dModel(nodes, roots, meshes, skin, byName, matTex, matColor,
-            minB, maxB);
+            minB, maxB, jointWeighted, topoNeeded, topoParent);
         model.resetPose();
         model.updateGlobals();
         model.recomputeBounds(glb);
@@ -443,18 +502,61 @@ final class L3dModel {
         }
     }
 
-    /** 动作应用后调用：自根向叶算全局矩阵，再算关节调色板。 */
+    /** 动作应用后调用：只算需要节点（带权关节+祖先）的全局矩阵，再算带权关节调色板。 */
     void updateGlobals() {
-        for (int root : rootNodes) {
-            updateGlobalRecursive(root, null);
+        long g0 = globDbg >= 0 ? System.nanoTime() : 0;
+        if (topoNeeded != null) {
+            for (int ti = 0; ti < topoNeeded.length; ti++) {
+                Node nd = nodes[topoNeeded[ti]];
+                int pi = topoParent[ti];
+                if (pi < 0) {
+                    System.arraycopy(nd.local, 0, nd.global, 0, 16);
+                } else {
+                    L3dMat.mul(nd.global, nodes[topoNeeded[pi]].global, nd.local);
+                }
+            }
+        } else {
+            for (int root : rootNodes) {
+                updateGlobalRecursive(root, null);
+            }
         }
-        if (skin != null) {
+        long g1 = globDbg >= 0 ? System.nanoTime() : 0;
+        if (skin != null && jointWeighted != null) {
             for (int ji = 0; ji < skin.joints.length; ji++) {
+                if (!jointWeighted[ji]) continue;   // 无权重的调色板条目永不被采样
                 L3dMat.mulOffset(jointPalette, ji * 16,
                     nodes[skin.joints[ji]].global, 0, skin.inverseBind, ji * 16);
             }
         }
+        if (globDbg >= 0) {
+            globDbg++;
+            if (globDbg % 120 == 0) {
+                android.util.Log.i(TAG, "globDbg: recurse=" + ((g1 - g0) / 1000) + "uS"
+                    + " palette=" + ((System.nanoTime() - g1) / 1000) + "uS");
+            }
+        }
     }
+
+    private static int countTrue(boolean[] a) {
+        int c = 0;
+        for (boolean v : a) if (v) c++;
+        return c;
+    }
+
+    /** needed 子树的 DFS 后序（父先出）；iterativeDepth 足够（骨架链深 ~数十） */
+    private static void emitNeeded(int i, boolean[] needed, Node[] nodes,
+                                   int[] state, java.util.ArrayList<Integer> order) {
+        if (state[i] != 0) return;
+        state[i] = 1;
+        int p = nodes[i].parent;
+        if (p >= 0 && needed[p]) {
+            emitNeeded(p, needed, nodes, state, order);
+        }
+        state[i] = 2;
+        order.add(i);
+    }
+
+    private static int globDbg = 0;
 
     private void updateGlobalRecursive(int idx, float[] parentGlobal) {
         Node nd = nodes[idx];
