@@ -185,14 +185,19 @@ public final class L3dScene {
         float aspect = (float) width / (float) Math.max(1, height);
 
         float[] proj = projScratch;
-        // 近远平面必须贴住模型：原实现 near=dist/100、far=dist+radius*20（比值 ~800:1），
-        // 在 16 位深度缓冲下模型处深度分辨率约 4e-3 单位，比贴花偏移量大一个量级——
-        // 嘴线/腮红这类贴着皮肤的贴花几何与皮肤互相穿插，细线被打成点状
-        // （CPU 按同数据光栅化是连续细线、Blender 亦然）。放宽到 zoom 极限也够用的边距。
-        float near = Math.max(dist - radius * 2.5f, radius * 0.05f);
-        float far = dist + radius * 3f;
+        // 近远平面按模型"真实深度厚度"收：深度精度只取决于 near 与 z 跨度，
+        // 用取景球半径（含高度/宽度）会白扔一个量级的精度——贴得很近的表面
+        // （嘴线贴花、眼片 vs 眼睑）就会互相穿插。pose 只缩放 x/y（viewPose 不动 m[10]），
+        // 故 z 厚度与 zoom 无关，留 50% 余量即可。
+        float zHalf = Math.abs(mx[2] - mn[2]) * 0.5f;
+        if (Float.isInfinite(zHalf) || Float.isNaN(zHalf) || zHalf < radius * 1e-3f) {
+            zHalf = radius * 0.25f;
+        }
+        float half = zHalf + Math.max(zHalf * 0.5f, radius * 0.02f);
+        float near = Math.max(dist - half, half * 0.05f);
+        float far = dist + half;
         if (!(near > 0f) || !(far > near + 1e-3f)) {
-            near = Math.max(dist * 0.5f, 0.1f);
+            near = Math.max(dist - radius * 2.5f, radius * 0.05f);
             far = dist + radius * 3f;
         }
         L3dMat.perspective(proj, FOV_RAD, aspect, near, far);
