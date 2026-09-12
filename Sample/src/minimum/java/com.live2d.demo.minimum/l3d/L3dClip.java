@@ -16,6 +16,10 @@ final class L3dClip {
     private final int[] paths;
     private final float[][] times;    // [ch][key]
     private final float[][] values;   // [ch][key * n]
+    // 采样导出的动作所有通道共享同一时间轴：去重后每帧每轴只算一次段索引（带跨帧缓存）
+    private final int[] chanUniq;     // [ch] → uniqTimes 下标
+    private final float[][] uniqTimes;
+    private final int[] uniqSeg;      // [uniq] → 上一帧段索引（时间连贯时 O(1)）
 
     private L3dClip(String name, float durationS, int[] targets, int[] paths,
                     float[][] times, float[][] values) {
@@ -25,6 +29,24 @@ final class L3dClip {
         this.paths = paths;
         this.times = times;
         this.values = values;
+        this.chanUniq = new int[targets.length];
+        java.util.ArrayList<float[]> uniq = new java.util.ArrayList<float[]>();
+        for (int c = 0; c < times.length; c++) {
+            int found = -1;
+            for (int u = 0; u < uniq.size(); u++) {
+                if (java.util.Arrays.equals(uniq.get(u), times[c])) {
+                    found = u;
+                    break;
+                }
+            }
+            if (found < 0) {
+                uniq.add(times[c]);
+                found = uniq.size() - 1;
+            }
+            chanUniq[c] = found;
+        }
+        this.uniqTimes = uniq.toArray(new float[uniq.size()][]);
+        this.uniqSeg = new int[uniqTimes.length];
     }
 
     /**
@@ -106,23 +128,33 @@ final class L3dClip {
 
     /** 把剪辑在时刻 t（秒，调用方已做循环/钳制）的采样写到节点上。 */
     void apply(L3dModel model, float t) {
-        for (int c = 0; c < targets.length; c++) {
-            L3dModel.Node node = model.nodes[targets[c]];
-            float[] ts = times[c];
-            float[] vs = values[c];
-            int nc = PATH_N[paths[c]];
+        // 段索引按唯一时间轴计算（跨帧缓存，播放时间连贯时每轴 O(1)）
+        for (int u = 0; u < uniqTimes.length; u++) {
+            float[] ts = uniqTimes[u];
             int last = ts.length - 1;
-            if (last < 0) continue;
-            int seg = 0;
+            int seg;
             if (t <= ts[0]) {
                 seg = -1;
             } else if (t >= ts[last]) {
                 seg = last - 1;
             } else {
-                // 线性扫描足够：单关节关键帧量级 ~120，二分收益不抵分支
-                while (seg < last - 1 && ts[seg + 1] <= t) seg++;
+                seg = uniqSeg[u];
+                if (seg < 0 || seg >= last || ts[seg] > t) {
+                    seg = 0;
+                }
+                while (seg < last - 1 && ts[seg + 1] <= t) {
+                    seg++;
+                }
             }
-            int o;
+            uniqSeg[u] = seg;
+        }
+        for (int c = 0; c < targets.length; c++) {
+            L3dModel.Node node = model.nodes[targets[c]];
+            float[] vs = values[c];
+            int nc = PATH_N[paths[c]];
+            float[] ts = uniqTimes[chanUniq[c]];
+            int last = ts.length - 1;
+            int seg = uniqSeg[chanUniq[c]];
             if (seg < 0) {
                 write(node, paths[c], vs, 0, 0f);
                 continue;
@@ -130,7 +162,7 @@ final class L3dClip {
             float t0 = ts[seg];
             float t1 = ts[Math.min(seg + 1, last)];
             float u = t1 > t0 ? (t - t0) / (t1 - t0) : 0f;
-            o = seg * nc;
+            int o = seg * nc;
             if (seg == last - 1 && t >= t1) {
                 write(node, paths[c], vs, (seg + 1) * nc, 1f);
             } else {

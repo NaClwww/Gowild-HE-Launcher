@@ -15,6 +15,14 @@
   * **控制面**：`GET/POST /api/control/animation`（动作清单/播放/停止单次/倍速）；descriptor 增加 `type`（`live2d`/`l3d`）与 l3d 的 `format_version`/`animations`；`/api/status` 增加 `type`；Live2D 专属控制端点在 l3d 上屏时返回 `409`（pose/animation 共享）。上传按包内容自动识别类型，l3d 校验 manifest/glTF 魔数。
   * `docs/API.md` v0.6（§5 包格式、§6.8、错误码、已知限制）。
 
+### Changed（性能优化，同日第二轮）
+
+* miku_eve 实测 **14 → 36fps**（分段计时驱动，探针保留在 L3dScene/L3dModel，默认关闭、置 `perfDbg=1` 开启）：
+  * **蒙皮热循环重写**：52.5ms → 11ms/帧——结果写普通 `float[]` 暂存后一次性 `put`（原先 76k 次逐 float `Buffer.put` 是最大开销）、单权重快速路径（刚性绑定部分免 4 权重累加）、动态 VBO 改 pos3+uv2 紧凑布局（stride 20B）。
+  * **动作时间轴去重**：采样导出的动作所有通道共享同一时间轴，去重后每帧每轴只算一次段索引（带跨帧缓存）；实测 apply 仅 0.7ms（此前大头其实在 globals）。
+  * 剩余分段（120 帧均值）：`globals≈12.2ms`（379 节点全局矩阵 + 375 调色板，Java 数组开销，下一轮优化目标）、`skin≈11.1ms`、`draw≈0.9ms`。
+* **修复优化引入的 UV 错位**：动态 VBO 改紧凑布局时 stride 改了但 uv 属性偏移漏改（仍 24，读到下一顶点的位置数据），贴图全串（腿乱纹/衣服糊白/裙斑马纹）；改为蒙皮图元 uv@12、静态图元 uv@24。**教训：改顶点布局必须同步核对全部 vertexAttribPointer 偏移，且改完必须截图目检**（性能数字正常不代表画面正常）。
+
 ### Fixed
 
 * **本机（Adreno 304 老驱动）三个 GL 特性不可用/误编译，l3d 管线全部绕开**（各有真机截图证据链）：

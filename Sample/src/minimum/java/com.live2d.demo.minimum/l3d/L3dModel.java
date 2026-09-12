@@ -92,7 +92,8 @@ final class L3dModel {
         float[] uv;                                     // 4 分量填充，取 [0..1]
         float[] joint;
         float[] weight;
-        FloatBuffer buf;                                // 顶点数 * 8
+        float[] staging;                                // 顶点数 * 5（pos3+uv2），热循环写这里
+        FloatBuffer buf;                                // 顶点数 * 5（put 一次批量）
         int dynVbo;
     }
 
@@ -312,15 +313,16 @@ final class L3dModel {
                     sc.uv = uv;
                     sc.joint = joint;
                     sc.weight = weight;
+                    sc.staging = new float[vc * 5];
                     sc.buf = ByteBuffer
-                        .allocateDirect(vc * 8 * 4)
+                        .allocateDirect(vc * 5 * 4)
                         .order(ByteOrder.nativeOrder())
                         .asFloatBuffer();
                     int[] dyn = new int[1];
                     glGenBuffers(1, dyn, 0);
                     sc.dynVbo = dyn[0];
                     glBindBuffer(GL_ARRAY_BUFFER, sc.dynVbo);
-                    glBufferData(GL_ARRAY_BUFFER, vc * 8 * 4, null, GLES20.GL_STREAM_DRAW);
+                    glBufferData(GL_ARRAY_BUFFER, vc * 5 * 4, null, GLES20.GL_STREAM_DRAW);
                     pr.skinCache = sc;
                     pr.vbo = sc.dynVbo;
                 } else {
@@ -466,64 +468,116 @@ final class L3dModel {
         }
     }
 
-    /** CPU 蒙皮：蒙皮图元顶点变换后写动态 VBO（pos3 + nor3(0) + uv2）。 */
+    /**
+     * CPU 蒙皮：蒙皮图元顶点变换后写动态 VBO（pos3+uv2 紧凑布局，stride 20B、uv@12）。
+     * 热循环三原则（实测 52ms → 见 CHANGELOG）：结果写普通 float[]（免 Buffer.put 逐次
+     * 调用）、单权重快速路径（免 4 权重累加）、最后一次性 buf.put 批量上传。
+     */
     void skinFrame() {
         if (skin == null) return;
         final float[] pal = jointPalette;
-        int primIdx = 0;
+        final int jointN = skin.joints.length;
         for (Mesh mesh : meshes) {
             for (Primitive pr : mesh.prims) {
                 if (!pr.skinned || pr.skinCache == null) continue;
                 SkinCache sc = pr.skinCache;
-                float[] pos = sc.pos;
-                float[] uv = sc.uv;
-                float[] joint = sc.joint;
-                float[] weight = sc.weight;
-                int vc = pos.length / 3;
+                final float[] pos = sc.pos;
+                final float[] uv = sc.uv;
+                final float[] joint = sc.joint;
+                final float[] weight = sc.weight;
+                final float[] out = sc.staging;
+                final int vc = pos.length / 3;
+                final boolean clamp = clampRange > 0f;
+                final float cX = clampCenter[0], cY = clampCenter[1], cZ = clampCenter[2];
+                int o = 0;
+                for (int v = 0, p = 0, q = 0; v < vc; v++, p += 3, q += 4) {
+                    final float px = pos[p];
+                    final float py = pos[p + 1];
+                    final float pz = pos[p + 2];
+                    final float w0 = weight[q];
+                    final float w1 = weight[q + 1];
+                    final float w2 = weight[q + 2];
+                    final float w3 = weight[q + 3];
+                    float x, y, z;
+                    if (w1 < 1e-6f && w2 < 1e-6f && w3 < 1e-6f) {
+                        // 单权重快速路径（刚性绑定部分）
+                        final int b = (int) (joint[q] + 0.5f) * 16;
+                        if (b >= 0 && b < jointN * 16) {
+                            x = w0 * (pal[b] * px + pal[b + 4] * py + pal[b + 8] * pz + pal[b + 12]);
+                            y = w0 * (pal[b + 1] * px + pal[b + 5] * py + pal[b + 9] * pz + pal[b + 13]);
+                            z = w0 * (pal[b + 2] * px + pal[b + 6] * py + pal[b + 10] * pz + pal[b + 14]);
+                        } else {
+                            x = px; y = py; z = pz;
+                        }
+                    } else {
+                        x = y = z = 0f;
+                        float wv = w0;
+                        if (wv > 0f) {
+                            int b = (int) (joint[q] + 0.5f) * 16;
+                            if (b >= 0 && b < jointN * 16) {
+                                x += wv * (pal[b] * px + pal[b + 4] * py + pal[b + 8] * pz + pal[b + 12]);
+                                y += wv * (pal[b + 1] * px + pal[b + 5] * py + pal[b + 9] * pz + pal[b + 13]);
+                                z += wv * (pal[b + 2] * px + pal[b + 6] * py + pal[b + 10] * pz + pal[b + 14]);
+                            }
+                        }
+                        wv = w1;
+                        if (wv > 0f) {
+                            int b = (int) (joint[q + 1] + 0.5f) * 16;
+                            if (b >= 0 && b < jointN * 16) {
+                                x += wv * (pal[b] * px + pal[b + 4] * py + pal[b + 8] * pz + pal[b + 12]);
+                                y += wv * (pal[b + 1] * px + pal[b + 5] * py + pal[b + 9] * pz + pal[b + 13]);
+                                z += wv * (pal[b + 2] * px + pal[b + 6] * py + pal[b + 10] * pz + pal[b + 14]);
+                            }
+                        }
+                        wv = w2;
+                        if (wv > 0f) {
+                            int b = (int) (joint[q + 2] + 0.5f) * 16;
+                            if (b >= 0 && b < jointN * 16) {
+                                x += wv * (pal[b] * px + pal[b + 4] * py + pal[b + 8] * pz + pal[b + 12]);
+                                y += wv * (pal[b + 1] * px + pal[b + 5] * py + pal[b + 9] * pz + pal[b + 13]);
+                                z += wv * (pal[b + 2] * px + pal[b + 6] * py + pal[b + 10] * pz + pal[b + 14]);
+                            }
+                        }
+                        wv = w3;
+                        if (wv > 0f) {
+                            int b = (int) (joint[q + 3] + 0.5f) * 16;
+                            if (b >= 0 && b < jointN * 16) {
+                                x += wv * (pal[b] * px + pal[b + 4] * py + pal[b + 8] * pz + pal[b + 12]);
+                                y += wv * (pal[b + 1] * px + pal[b + 5] * py + pal[b + 9] * pz + pal[b + 13]);
+                                z += wv * (pal[b + 2] * px + pal[b + 6] * py + pal[b + 10] * pz + pal[b + 14]);
+                            }
+                        }
+                    }
+                    if (clamp) {
+                        // 垃圾权重顶点（坐标 1e38 级）收缩到中心 → 退化三角形不可见
+                        if (Float.isNaN(x) || Float.isNaN(y) || Float.isNaN(z)
+                            || Float.isInfinite(x) || Float.isInfinite(y) || Float.isInfinite(z)
+                            || Math.abs(x - cX) > clampRange
+                            || Math.abs(y - cY) > clampRange
+                            || Math.abs(z - cZ) > clampRange) {
+                            x = cX;
+                            y = cY;
+                            z = cZ;
+                        }
+                    }
+                    out[o] = x;
+                    out[o + 1] = y;
+                    out[o + 2] = z;
+                    if (uv != null) {
+                        out[o + 3] = uv[q];
+                        out[o + 4] = uv[q + 1];
+                    } else {
+                        out[o + 3] = 0f;
+                        out[o + 4] = 0f;
+                    }
+                    o += 5;
+                }
                 FloatBuffer buf = sc.buf;
                 buf.clear();
-                for (int v = 0; v < vc; v++) {
-                    float px = pos[v * 3];
-                    float py = pos[v * 3 + 1];
-                    float pz = pos[v * 3 + 2];
-                    float x = 0f, y = 0f, z = 0f;
-                    for (int w = 0; w < 4; w++) {
-                        float wv = weight[v * 4 + w];
-                        if (wv <= 0f) continue;
-                        int jIdx = (int) (joint[v * 4 + w] + 0.5f);
-                        if (jIdx < 0 || jIdx >= skin.joints.length) continue;
-                        int o = jIdx * 16;
-                        x += wv * (pal[o] * px + pal[o + 4] * py + pal[o + 8] * pz + pal[o + 12]);
-                        y += wv * (pal[o + 1] * px + pal[o + 5] * py + pal[o + 9] * pz + pal[o + 13]);
-                        z += wv * (pal[o + 2] * px + pal[o + 6] * py + pal[o + 10] * pz + pal[o + 14]);
-                    }
-                    if (clampRange > 0f) {
-                        // 垃圾权重顶点（坐标 1e38 级）收缩到中心 → 退化三角形不可见
-                        boolean insane = Float.isNaN(x) || Float.isNaN(y) || Float.isNaN(z)
-                            || Float.isInfinite(x) || Float.isInfinite(y) || Float.isInfinite(z);
-                        if (!insane) {
-                            insane = Math.abs(x - clampCenter[0]) > clampRange
-                                || Math.abs(y - clampCenter[1]) > clampRange
-                                || Math.abs(z - clampCenter[2]) > clampRange;
-                        }
-                        if (insane) {
-                            x = clampCenter[0];
-                            y = clampCenter[1];
-                            z = clampCenter[2];
-                        }
-                    }
-                    buf.put(x).put(y).put(z);
-                    buf.put(0f).put(0f).put(0f);        // nor 占位（unlit 用不到）
-                    if (uv != null) {
-                        buf.put(uv[v * 4]).put(uv[v * 4 + 1]);
-                    } else {
-                        buf.put(0f).put(0f);
-                    }
-                }
+                buf.put(out, 0, vc * 5);
                 buf.position(0);
                 glBindBuffer(GL_ARRAY_BUFFER, sc.dynVbo);
-                glBufferData(GL_ARRAY_BUFFER, vc * 8 * 4, buf, GLES20.GL_STREAM_DRAW);
-                primIdx++;
+                glBufferData(GL_ARRAY_BUFFER, vc * 5 * 4, buf, GLES20.GL_STREAM_DRAW);
             }
         }
         glBindBuffer(GL_ARRAY_BUFFER, 0);
@@ -549,14 +603,16 @@ final class L3dModel {
                 glUniform1i(r.locHasTex, tex != 0 ? 1 : 0);
 
                 glBindBuffer(GL_ARRAY_BUFFER, pr.vbo);
-                int stride = pr.skinned ? 8 * 4 : 16 * 4;
+                int stride = pr.skinned ? 5 * 4 : 16 * 4;
                 if (r.locPos >= 0) {
                     glEnableVertexAttribArray(r.locPos);
                     glVertexAttribPointer(r.locPos, 3, GL_FLOAT, false, stride, 0);
                 }
                 if (r.locUv >= 0) {
                     glEnableVertexAttribArray(r.locUv);
-                    glVertexAttribPointer(r.locUv, 2, GL_FLOAT, false, stride, 24);
+                    // 动态 VBO 布局 pos3+uv2（uv@12）；静态 VBO pos3+nor3+uv2（uv@24）
+                    glVertexAttribPointer(r.locUv, 2, GL_FLOAT, false, stride,
+                        pr.skinned ? 12 : 24);
                 }
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, pr.ebo);
                 glDrawElements(GLES20.GL_TRIANGLES, pr.indexCount, GL_UNSIGNED_SHORT, 0);

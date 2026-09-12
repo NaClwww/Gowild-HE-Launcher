@@ -144,6 +144,8 @@ public final class L3dScene {
     // ---- 每帧（GL 线程） ----
 
     public void update(float dtSeconds, int width, int height, float poseX, float poseY, float poseZoom) {
+        final long perfT0 = perfDbg >= 0 ? System.nanoTime() : 0;
+        final boolean prof = perfDbg >= 0;
         if (active != null) {
             playhead += dtSeconds * speed;
             float dur = active.durationS;
@@ -156,11 +158,16 @@ public final class L3dScene {
                 }
             }
         }
+        long a0 = prof ? System.nanoTime() : 0;
         model.resetPose();
+        long a1 = prof ? System.nanoTime() : 0;
         if (active != null) {
             active.apply(model, (float) playhead);
         }
+        long a2 = prof ? System.nanoTime() : 0;
         model.updateGlobals();
+        long a3 = prof ? System.nanoTime() : 0;
+        if (prof) { perfReset += a1 - a0; perfApply += a2 - a1; perfGlobals += a3 - a2; }
 
         // 相机：rest 包围盒自动取景（无旋转，看向 -Z）
         float[] mn = model.sceneMin();
@@ -196,13 +203,33 @@ public final class L3dScene {
         L3dMat.mul(pose, pose, view);       // pose·V
         L3dMat.mul(proj, proj, pose);       // P·pose·V
 
+        final long perfT1 = perfDbg >= 0 ? System.nanoTime() : 0;
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         GLES20.glDepthFunc(GLES20.GL_LEQUAL);
         renderer.resetAttribArrays();
         renderer.useProgram();
+        long t0 = perfDbg >= 0 ? System.nanoTime() : 0;
         model.skinFrame();
+        long t1 = perfDbg >= 0 ? System.nanoTime() : 0;
         model.draw(renderer, proj);
         L3dRenderer.endFrame();
+        if (perfDbg >= 0) {
+            long t2 = System.nanoTime();
+            perfAnim += perfT1 - perfT0;
+            perfSkin += t1 - t0;
+            perfDraw += t2 - t1;
+            perfFrames++;
+            if (perfFrames == 120) {
+                android.util.Log.i(TAG, "perf(uS): anim=" + (perfAnim / 120 / 1000)
+                    + " [reset=" + (perfReset / 120 / 1000)
+                    + " apply=" + (perfApply / 120 / 1000)
+                    + " globals=" + (perfGlobals / 120 / 1000) + "]"
+                    + " skin=" + (perfSkin / 120 / 1000)
+                    + " draw=" + (perfDraw / 120 / 1000));
+                perfAnim = 0; perfSkin = 0; perfDraw = 0; perfFrames = 0;
+                perfReset = 0; perfApply = 0; perfGlobals = 0;
+            }
+        }
     }
 
     private static float finiteHalf(float a, float b) {
@@ -210,6 +237,10 @@ public final class L3dScene {
         return (Float.isInfinite(h) || Float.isNaN(h)) ? 0f : h;
     }
 
+
+    private int perfDbg = 0;   // 置 1 开启每 120 帧的分段耗时日志
+    private long perfAnim, perfSkin, perfDraw, perfReset, perfApply, perfGlobals;
+    private int perfFrames;
 
     private final float[] projScratch = new float[16];
     private final float[] viewScratch = new float[16];
