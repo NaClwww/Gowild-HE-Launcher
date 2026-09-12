@@ -414,6 +414,183 @@ public class ModelRepository {
         }
     }
 
+    /** 单动作上传结果。 */
+    public static class AnimUploadResult {
+        public Descriptor descriptor;
+        public boolean replaced;
+        public float durationS;
+    }
+
+    /**
+     * 向 l3d 包追加/替换单个动作（raw glb 整体 body）。
+     * 校验：glTF 魔数、恰好 1 条动画、通道目标节点名必须存在于模型 model.glb
+     * （防错骨架误绑）；通过后写 anims/<名>.glb 并更新 manifest.json。
+     */
+    public synchronized AnimUploadResult addAnimation(String modelName, String animName,
+                                                      InputStream in, long contentLength)
+        throws IOException {
+        Descriptor d = find(modelName);
+        if (d == null) throw new ModelException(404, "model not found: " + modelName);
+        if (!"l3d".equals(d.type)) throw new ModelException(400, "not a l3d model: " + modelName);
+        if (contentLength <= 0) throw new ModelException(400, "Content-Length required");
+        if (contentLength > MAX_ANIM_BYTES) throw new ModelException(400, "animation too large");
+        if (!isValidName(animName)) throw new ModelException(400, "invalid animation name: " + animName);
+
+        byte[] body = readExactly(in, contentLength);
+        if (body.length < contentLength) {
+            throw new ModelException(400, "body shorter than Content-Length");
+        }
+        com.live2d.demo.minimum.l3d.L3dGlb glb;
+        try {
+            glb = com.live2d.demo.minimum.l3d.L3dGlb.parse(body);
+        } catch (Exception e) {
+            throw new ModelException(400, "not a valid glb: " + e.getMessage());
+        }
+        if (glb.length("animations") != 1) {
+            throw new ModelException(400, "expected exactly 1 animation, got " + glb.length("animations"));
+        }
+
+        // 模型节点名集合（model.glb）
+        java.util.HashSet<String> modelNodes = new java.util.HashSet<String>();
+        try {
+            JSONObject mj = new JSONObject(new String(
+                readAll(new FileInputStream(new File(d.homeDir, "manifest.json"))), "UTF-8"));
+            byte[] mb = LAppMinimumPal.loadFileAsBytes(d.homeDir + mj.optString("model", "model.glb"));
+            com.live2d.demo.minimum.l3d.L3dGlb mg = com.live2d.demo.minimum.l3d.L3dGlb.parse(mb);
+            JSONArray mn = mg.json.optJSONArray("nodes");
+            if (mn != null) {
+                for (int i = 0; i < mn.length(); i++) {
+                    modelNodes.add(mn.getJSONObject(i).optString("name", ""));
+                }
+            }
+        } catch (ModelException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ModelException(400, "model.glb unreadable: " + e);
+        }
+
+        // 动画通道目标 → 节点名，必须全部能在模型里找到
+        java.util.ArrayList<String> missing = new java.util.ArrayList<String>();
+        try {
+            org.json.JSONObject anim = glb.obj(0, "animations");
+            org.json.JSONArray animNodes = glb.json.optJSONArray("nodes");
+            org.json.JSONArray channels = anim.getJSONArray("channels");
+            for (int i = 0; i < channels.length(); i++) {
+                org.json.JSONObject target = channels.getJSONObject(i).getJSONObject("target");
+                int nodeIdx = target.optInt("node", -1);
+                String nn = "";
+                if (nodeIdx >= 0 && animNodes != null && nodeIdx < animNodes.length()) {
+                    nn = animNodes.getJSONObject(nodeIdx).optString("name", "");
+                }
+                if (nn.equals("") || !modelNodes.contains(nn)) {
+                    if (missing.size() < 3) missing.add(nn.equals("") ? "#" + nodeIdx : nn);
+                }
+            }
+        } catch (ModelException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new ModelException(400, "animation structure bad: " + e);
+        }
+        if (!missing.isEmpty()) {
+            throw new ModelException(400, "animation targets unknown nodes (rig mismatch): " + missing);
+        }
+
+        // 时长（采样时间轴 max-min）
+        float duration = 0f;
+        try {
+            org.json.JSONObject anim = glb.obj(0, "animations");
+            org.json.JSONArray samplers = anim.getJSONArray("samplers");
+            for (int i = 0; i < samplers.length(); i++) {
+                org.json.JSONObject acc = glb.obj(
+                    samplers.getJSONObject(i).getInt("input"), "accessors");
+                if (acc.has("max") && acc.has("min")) {
+                    duration = Math.max(duration,
+                        (float) (acc.getJSONArray("max").getDouble(0)
+                            - acc.getJSONArray("min").getDouble(0)));
+                }
+            }
+        } catch (Exception ignored) {
+        }
+
+        // 写文件 + 更新 manifest（临时文件+rename，避免半写状态）
+        File animsDir = new File(d.homeDir, "anims");
+        //noinspection ResultOfMethodCallIgnored
+        animsDir.mkdirs();
+        File target = new File(animsDir, animName + ".glb");
+        boolean replaced = target.exists();
+        File tmp = new File(animsDir, "." + animName + ".glb.tmp");
+        writeBytes(tmp, body);
+        if (!tmp.renameTo(target)) {
+            copyRecursively(tmp, target);
+            deleteRecursively(tmp);
+        }
+
+        File manifestFile = new File(d.homeDir, "manifest.json");
+        JSONObject manifest;
+        JSONArray anims;
+        String manifestText;
+        try {
+            manifest = new JSONObject(new String(
+                readAll(new FileInputStream(manifestFile)), "UTF-8"));
+            anims = manifest.optJSONArray("animations");
+            if (anims == null) {
+                anims = new JSONArray();
+                manifest.put("animations", anims);
+            }
+            for (int i = 0; i < anims.length(); i++) {
+                if (animName.equals(anims.getJSONObject(i).optString("name", ""))) {
+                    anims.remove(i);
+                    break;
+                }
+            }
+            anims.put(new JSONObject()
+                .put("name", animName)
+                .put("file", "anims/" + animName + ".glb")
+                .put("duration_s", Math.round(duration * 10000.0) / 10000.0));
+            manifestText = manifest.toString(2);
+        } catch (IOException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IOException("manifest update failed: " + e);
+        }
+        File mTmp = new File(d.homeDir, ".manifest.json.tmp");
+        writeBytes(mTmp, manifestText.getBytes("UTF-8"));
+        if (!mTmp.renameTo(manifestFile)) {
+            copyRecursively(mTmp, manifestFile);
+            deleteRecursively(mTmp);
+        }
+
+        AnimUploadResult r = new AnimUploadResult();
+        r.descriptor = find(modelName);
+        r.replaced = replaced;
+        r.durationS = duration;
+        return r;
+    }
+
+    private static final long MAX_ANIM_BYTES = 100L * 1024 * 1024;
+
+    /** 按 Content-Length 精确读（keep-alive 下读到 EOF 会阻塞到超时）。 */
+    private static byte[] readExactly(InputStream in, long len) throws IOException {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream((int) Math.min(len, 1 << 20));
+        byte[] buf = new byte[65536];
+        long remaining = len;
+        int n;
+        while (remaining > 0 && (n = in.read(buf, 0, (int) Math.min(buf.length, remaining))) > 0) {
+            bos.write(buf, 0, n);
+            remaining -= n;
+        }
+        return bos.toByteArray();
+    }
+
+    private static void writeBytes(File f, byte[] data) throws IOException {
+        FileOutputStream out = new FileOutputStream(f);
+        try {
+            out.write(data);
+        } finally {
+            out.close();
+        }
+    }
+
     public void delete(String name, boolean builtin) {
         if (builtin) throw new ModelException(403, "builtin model cannot be deleted");
         File dir = new File(externalRoot, name);

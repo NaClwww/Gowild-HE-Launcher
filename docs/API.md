@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **文档版本** | 0.6 |
+| **文档版本** | 0.7 |
 | **更新日期** | 2026-09-12 |
 | **服务端口** | `8900`（HTTP，设备端常驻，随 app 前台启停） |
 | **实测环境** | la0920 智能音箱 · Android 5.1.1 (API 22) · armeabi-v7a · 型号 C2-CMCC |
@@ -231,6 +231,24 @@ curl -X POST --data-binary @model.zip "$BASE/api/models?name=21miku"
 | `403` | 内置模型不可删 |
 | `404` | 不存在 |
 | `409` | 该模型正在上屏（先 select 其他模型再删） |
+
+### 5.6 `POST /api/models/{name}/animations?name=<动作名>` — 绑定单个动作（l3d）
+
+向已存在的 l3d 包追加/替换单个动作，**无需重传整包**。
+
+```bash
+curl -X POST --data-binary @eve_559010221.glb \
+     "$BASE/api/models/miku_eve/animations?name=eve_559010221"
+# 201 {"ok":true,"added":"eve_559010221","duration_s":6.0667,"animations":[...],"reloading":true}
+# 200 {"ok":true,"replaced":"...","reloading":true}   （同名动作替换）
+```
+
+- **Body 为动作 glb 整文件**（骨架 + 单条动画；建议用 `tools/blend_export_worker.py anim` 导出）。
+- `?name=` 必填：动作名（合法字符同模型名），播放时即用此名。
+- 服务端校验：glTF 魔数、**恰好 1 条动画**、所有通道目标节点名必须存在于该模型 `model.glb`（骨架不匹配直接 400，如 `animation targets unknown nodes (rig mismatch): [b1, ...]`）；上限 100MB。
+- 表情动画支持：动作可包含 morph（weights）通道——导出时 worker 会把"驱动器→形态键"链路按帧烘焙成显式 fcurve（见 CHANGELOG 0.10），眨眼/口型随动作播放。
+- 若该模型正上屏：**自动热重载**（响应带 `"reloading":true`），数秒内新动作即可播放。
+- `201` 新增 / `200` 替换；`400` 校验失败；`404` 模型不存在。
 
 ### 5.5 `POST /api/models/{name}/select` — 加载上屏
 

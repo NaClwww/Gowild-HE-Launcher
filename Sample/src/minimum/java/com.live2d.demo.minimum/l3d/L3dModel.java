@@ -114,6 +114,13 @@ final class L3dModel {
 
     static final class Mesh {
         Primitive[] prims;
+        // morph（形态键）：targets[k] = POSITION 形变量（顶点数*3），weights 每帧由动作写入
+        int targetCount;
+        float[][] morphTargets;
+        float[] morphWeights;
+        float[] morphDefaults;
+        int[] activeScratch = new int[1];            // load 时按 targetCount 扩
+        int activeN;
     }
 
     static final class Skin {
@@ -155,6 +162,20 @@ final class L3dModel {
 
     Integer nodeIndex(String name) {
         return nodeByName.get(name);
+    }
+
+    // ---- L3dClip 用（同包） ----
+
+    int nodeMeshIdx(int nodeIdx) {
+        return nodeIdx >= 0 && nodeIdx < nodes.length ? nodes[nodeIdx].mesh : -1;
+    }
+
+    int meshTargetCount(int meshIdx) {
+        return meshIdx >= 0 && meshIdx < meshes.length ? meshes[meshIdx].targetCount : 0;
+    }
+
+    float[] morphWeightsOf(int meshIdx) {
+        return meshIdx >= 0 && meshIdx < meshes.length ? meshes[meshIdx].morphWeights : null;
     }
 
     /** 该节点是否为蒙皮关节（关节的 translation 通道会破坏 rest 骨长偏移，须忽略）。 */
@@ -294,6 +315,28 @@ final class L3dModel {
             JSONArray jPrims = jMeshes.getJSONObject(mi).getJSONArray("primitives");
             Mesh mesh = new Mesh();
             mesh.prims = new Primitive[jPrims.length()];
+            // morph targets（表情形态键）：只取 POSITION 形变量，NORMAL 忽略（unlit）
+            org.json.JSONArray jTargets = jMeshes.getJSONObject(mi).optJSONArray("targets");
+            int vc0 = glb.obj(
+                jPrims.getJSONObject(0).getJSONObject("attributes").getInt("POSITION"),
+                "accessors").getInt("count");
+            if (jTargets != null && jTargets.length() > 0) {
+                mesh.targetCount = jTargets.length();
+                mesh.morphTargets = new float[mesh.targetCount][];
+                for (int t = 0; t < mesh.targetCount; t++) {
+                    mesh.morphTargets[t] = glb.readFloats(
+                        jTargets.getJSONObject(t).getInt("POSITION"));
+                }
+                JSONArray jw = jMeshes.getJSONObject(mi).optJSONArray("weights");
+                mesh.morphDefaults = new float[mesh.targetCount];
+                if (jw != null) {
+                    for (int t = 0; t < mesh.targetCount && t < jw.length(); t++) {
+                        mesh.morphDefaults[t] = (float) jw.optDouble(t, 0);
+                    }
+                }
+                mesh.morphWeights = new float[mesh.targetCount];
+                mesh.activeScratch = new int[mesh.targetCount];
+            }
             int owner = -1;
             for (int n = 0; n < nodes.length; n++) {
                 if (nodes[n].mesh == mi) {
@@ -491,8 +534,15 @@ final class L3dModel {
 
     // ---- 每帧（GL 线程） ----
 
-    /** 全部节点回到 rest。 */
+    /** 全部节点回到 rest，morph 权重回默认。 */
     void resetPose() {
+        for (Mesh mesh : meshes) {
+            if (mesh.morphWeights != null) {
+                System.arraycopy(mesh.morphDefaults, 0, mesh.morphWeights, 0,
+                    mesh.targetCount);
+                mesh.activeN = 0;
+            }
+        }
         for (Node nd : nodes) {
             if (nd.restIsMatrix) {
                 System.arraycopy(nd.restMatrix, 0, nd.local, 0, 16);
@@ -580,6 +630,15 @@ final class L3dModel {
         final float[] pal = jointPalette;
         final int jointN = skin.joints.length;
         for (Mesh mesh : meshes) {
+            // 活跃 morph 目标（权重超阈值的形态键），每帧一次
+            mesh.activeN = 0;
+            if (mesh.morphWeights != null) {
+                for (int k = 0; k < mesh.targetCount; k++) {
+                    if (Math.abs(mesh.morphWeights[k]) > 0.002f) {
+                        mesh.activeScratch[mesh.activeN++] = k;
+                    }
+                }
+            }
             for (Primitive pr : mesh.prims) {
                 if (!pr.skinned || pr.skinCache == null) continue;
                 SkinCache sc = pr.skinCache;
@@ -592,10 +651,22 @@ final class L3dModel {
                 final boolean clamp = clampRange > 0f;
                 final float cX = clampCenter[0], cY = clampCenter[1], cZ = clampCenter[2];
                 int o = 0;
+                final float[][] mT = mesh.morphTargets;
+                final float[] mW = mesh.morphWeights;
+                final int mN = mesh.activeN;
                 for (int v = 0, p = 0, q = 0; v < vc; v++, p += 3, q += 4) {
-                    final float px = pos[p];
-                    final float py = pos[p + 1];
-                    final float pz = pos[p + 2];
+                    float px = pos[p];
+                    float py = pos[p + 1];
+                    float pz = pos[p + 2];
+                    // morph：base + Σ w_k·形变量（表情形态键，先于蒙皮）
+                    for (int a = 0; a < mN; a++) {
+                        final int k = mesh.activeScratch[a];
+                        final float w = mW[k];
+                        final float[] d = mT[k];
+                        px += w * d[p];
+                        py += w * d[p + 1];
+                        pz += w * d[p + 2];
+                    }
                     final float w0 = weight[q];
                     final float w1 = weight[q + 1];
                     final float w2 = weight[q + 2];

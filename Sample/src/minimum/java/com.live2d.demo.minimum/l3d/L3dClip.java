@@ -8,12 +8,15 @@ final class L3dClip {
     static final int PATH_T = 0;
     static final int PATH_R = 1;
     static final int PATH_S = 2;
-    private static final int[] PATH_N = {3, 4, 3};
+    static final int PATH_W = 3;                    // morph 权重（nc = 该 mesh target 数）
+    private static final int[] PATH_N = {3, 4, 3};  // T/R/S 的分量宽度
 
     final String name;
     final float durationS;
     private final int[] targets;
     private final int[] paths;
+    private final int[] ncs;
+    private final int[] chanMesh;     // PATH_W 通道的目标 mesh，其余 -1
     private final float[][] times;    // [ch][key]
     private final float[][] values;   // [ch][key * n]
     // 采样导出的动作所有通道共享同一时间轴：去重后每帧每轴只算一次段索引（带跨帧缓存）
@@ -22,11 +25,13 @@ final class L3dClip {
     private final int[] uniqSeg;      // [uniq] → 上一帧段索引（时间连贯时 O(1)）
 
     private L3dClip(String name, float durationS, int[] targets, int[] paths,
-                    float[][] times, float[][] values) {
+                    int[] ncs, int[] chanMesh, float[][] times, float[][] values) {
         this.name = name;
         this.durationS = durationS;
         this.targets = targets;
         this.paths = paths;
+        this.ncs = ncs;
+        this.chanMesh = chanMesh;
         this.times = times;
         this.values = values;
         this.chanUniq = new int[targets.length];
@@ -69,6 +74,8 @@ final class L3dClip {
         int n = jChannels.length();
         int[] targets = new int[n];
         int[] paths = new int[n];
+        int[] ncs = new int[n];                     // 每通道值宽度（weights 通道 = target 数）
+        int[] chanMesh = new int[n];                // weights 通道的目标 mesh（其余 -1）
         float[][] times = new float[n][];
         float[][] values = new float[n][];
 
@@ -81,7 +88,8 @@ final class L3dClip {
             if (tp.equals("translation")) path = PATH_T;
             else if (tp.equals("rotation")) path = PATH_R;
             else if (tp.equals("scale")) path = PATH_S;
-            else continue; // weights/morph 目标本仓不用
+            else if (tp.equals("weights")) path = PATH_W;
+            else continue;
             // glTF：target.node 是本 anim 文件 nodes[] 的下标 → 按名字对到模型节点
             org.json.JSONArray animNodes = glb.array("nodes");
             int localNode = ch.getJSONObject("target").optInt("node", -1);
@@ -107,13 +115,24 @@ final class L3dClip {
             }
             float[] t = glb.readFloats(sampler.getInt("input"));
             float[] v = glb.readFloats(sampler.getInt("output"));
-            int nc = PATH_N[path];
+            int meshIdx = -1;
+            int nc;
+            if (path == PATH_W) {
+                // weights 通道：目标节点的 mesh，nc = 其 morph target 数
+                meshIdx = model.nodeMeshIdx(nodeIdx);
+                nc = model.meshTargetCount(meshIdx);
+                if (nc == 0) continue;              // 目标网格无 morph，通道无意义
+            } else {
+                nc = PATH_N[path];
+            }
             if (v.length < t.length * nc) {
                 throw new L3dGlb.L3dException("sampler output truncated on clip " + name);
             }
             if (t.length > 0 && t[t.length - 1] > duration) duration = t[t.length - 1];
             targets[bound] = nodeIdx;
             paths[bound] = path;
+            ncs[bound] = nc;
+            chanMesh[bound] = meshIdx;
             times[bound] = t;
             values[bound] = v;
             bound++;
@@ -122,7 +141,9 @@ final class L3dClip {
             throw new L3dGlb.L3dException("no usable channels in clip " + name);
         }
         return new L3dClip(name, duration, java.util.Arrays.copyOf(targets, bound),
-            java.util.Arrays.copyOf(paths, bound), java.util.Arrays.copyOf(times, bound),
+            java.util.Arrays.copyOf(paths, bound), java.util.Arrays.copyOf(ncs, bound),
+            java.util.Arrays.copyOf(chanMesh, bound),
+            java.util.Arrays.copyOf(times, bound),
             java.util.Arrays.copyOf(values, bound));
     }
 
@@ -149,14 +170,13 @@ final class L3dClip {
             uniqSeg[u] = seg;
         }
         for (int c = 0; c < targets.length; c++) {
-            L3dModel.Node node = model.nodes[targets[c]];
             float[] vs = values[c];
-            int nc = PATH_N[paths[c]];
+            int nc = ncs[c];
             float[] ts = uniqTimes[chanUniq[c]];
             int last = ts.length - 1;
             int seg = uniqSeg[chanUniq[c]];
             if (seg < 0) {
-                write(node, paths[c], vs, 0, 0f);
+                writeChannel(model, c, paths[c], vs, 0, 0f);
                 continue;
             }
             float t0 = ts[seg];
@@ -164,10 +184,24 @@ final class L3dClip {
             float u = t1 > t0 ? (t - t0) / (t1 - t0) : 0f;
             int o = seg * nc;
             if (seg == last - 1 && t >= t1) {
-                write(node, paths[c], vs, (seg + 1) * nc, 1f);
+                writeChannel(model, c, paths[c], vs, (seg + 1) * nc, 1f);
             } else {
-                write(node, paths[c], vs, o, u);
+                writeChannel(model, c, paths[c], vs, o, u);
             }
+        }
+    }
+
+    /** PATH_W 写 morph 权重数组；TRS 走原 write()。 */
+    private void writeChannel(L3dModel model, int c, int path, float[] vs, int o, float u) {
+        if (path != PATH_W) {
+            write(model.nodes[targets[c]], path, vs, o, u);
+            return;
+        }
+        float[] mw = model.morphWeightsOf(chanMesh[c]);
+        if (mw == null) return;
+        int nc = ncs[c];
+        for (int k = 0; k < nc; k++) {
+            mw[k] = vs[o + k];   // 采样导出：相邻关键帧值相同（LINEAR lerp 恒等）
         }
     }
 

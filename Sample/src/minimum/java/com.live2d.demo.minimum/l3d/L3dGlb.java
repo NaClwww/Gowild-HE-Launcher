@@ -11,14 +11,14 @@ import java.nio.ByteOrder;
  * Blender glTF 导出器）会用到的子集：POSITION/NORMAL/TEXCOORD_0/JOINTS_0/WEIGHTS_0、
  * LINEAR|STEP 动画采样、bufferView 对齐读取、内嵌 PNG/JPEG 图片。
  */
-final class L3dGlb {
-    JSONObject json;
-    byte[] bin;
+public final class L3dGlb {
+    public JSONObject json;
+    public byte[] bin;
 
     private L3dGlb() {
     }
 
-    static L3dGlb parse(byte[] data) throws L3dException {
+    public static L3dGlb parse(byte[] data) throws L3dException {
         if (data == null || data.length < 20 || data[0] != 'g' || data[1] != 'l'
             || data[2] != 'T' || data[3] != 'F') {
             throw new L3dException("not a GLB (bad magic)");
@@ -53,7 +53,7 @@ final class L3dGlb {
     }
 
     /** 业务错误（加载失败原因，供上层透出到 /api/status last_error）。 */
-    static class L3dException extends RuntimeException {
+    public static class L3dException extends RuntimeException {
         L3dException(String msg) {
             super(msg);
         }
@@ -220,11 +220,11 @@ final class L3dGlb {
 
     // ---- 小工具 ----
 
-    JSONArray array(String key) {
+    public JSONArray array(String key) {
         return json.optJSONArray(key);
     }
 
-    JSONObject obj(int index, String key) throws L3dException {
+    public JSONObject obj(int index, String key) throws L3dException {
         try {
             return json.getJSONArray(key).getJSONObject(index);
         } catch (Exception e) {
@@ -232,7 +232,7 @@ final class L3dGlb {
         }
     }
 
-    int length(String key) {
+    public int length(String key) {
         JSONArray a = json.optJSONArray(key);
         return a != null ? a.length() : 0;
     }

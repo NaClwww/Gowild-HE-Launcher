@@ -4,6 +4,19 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)。
 
+## [0.10] - 2026-09-12
+
+### Added
+
+* **表情（morph/形态键）支持**：miku_eve 的眨眼/口型是 Blender 形态键（Face 网格 26 个 morph target：`eye_close`/`eye_wink_L/R`/`mouth_a..o`/表情等），链路为"自定义属性（face_blink_L/R、face_mouth_open）→ 驱动器 → 形态键"。
+  * 导出侧（`tools/blend_export_worker.py`）：exporter 采不到驱动器结果——anim 模式导出前**按帧求值并显式烘焙形态键 fcurve**（183 帧 × 26 键）；动作文件多为复制副本，网格对象名剥掉 Blender 数字后缀（`Face.003`→`Face`）保证与模型节点名匹配；SCENE/ACTIONS 模式按来源 ID 拆成多条 glTF 动画，worker 内做 **GLB JSON 手术**合并为单条（channel/sampler 并入第一条，BIN 不动）——维持"单文件单动画"约定。
+  * 设备端：解析 mesh `targets`（POSITION 形变量，26×4135×3 浮点 ≈1.3MB）与 `weights` 动画通道；`skinFrame` 先叠加活跃 morph 形变量再 CPU 蒙皮（每帧仅权重超阈值的目标参与，通常 0~3 个）；无动作播放时 morph 权重回默认。
+* **`POST /api/models/{name}/animations?name=<动作名>`**：向 l3d 包**追加/替换单个动作**（raw glb body），不用重传整包。服务端校验 glTF 魔数、单动画、**通道目标节点名必须存在于模型**（骨架不匹配 400）；写 `anims/<名>.glb` + 原子更新 manifest；模型正上屏时自动热重载。`docs/API.md` v0.7 §5.6。
+
+### Verified
+
+* 真机：动作 blend（同骨架 Miku_Eve_Rig + 3 动作）导出 → `eve_559010221`、`eve_559010221_full_face` 两个动作经新端点绑定成功（各 6.07s，201），包内动作清单 5 个；full_face 播放时眨眼/张嘴表情可见（连续截图面部形态变化）；基础动作无回归 50+fps；负向：testrig 动作（骨架 b1/b2/b3）绑 miku_eve → `400 animation targets unknown nodes (rig mismatch)`，文件与 manifest 未被污染。
+
 ## [0.9] - 2026-09-12
 
 ### Added

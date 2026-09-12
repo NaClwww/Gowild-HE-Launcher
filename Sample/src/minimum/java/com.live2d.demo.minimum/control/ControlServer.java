@@ -88,6 +88,10 @@ public class ControlServer extends NanoHTTPD {
                 String name = rest.substring(0, rest.length() - "/select".length());
                 return select(name, repo);
             }
+            if (rest.endsWith("/animations") && method == Method.POST) {
+                String name = rest.substring(0, rest.length() - "/animations".length());
+                return addAnimation(name, s, repo);
+            }
             String name = rest;
             if (method == Method.GET) {
                 ModelRepository.Descriptor d = repo.find(name);
@@ -383,6 +387,45 @@ public class ControlServer extends NanoHTTPD {
             }
         });
         return json(202, new JSONObject().put("ok", true).put("loading", name));
+    }
+
+    /**
+     * POST /api/models/{name}/animations?name=<动作名>：向 l3d 包追加/替换单个动作
+     * （raw glb body）。服务端校验骨架节点名匹配；若该模型正上屏则自动热重载。
+     */
+    private Response addAnimation(final String modelName, IHTTPSession s, ModelRepository repo) throws Exception {
+        List<String> names = s.getParameters().get("name");
+        String animName = names != null && !names.isEmpty() ? names.get(0) : null;
+        if (animName == null || animName.length() == 0) {
+            return json(400, err("missing ?name= for animation"));
+        }
+        long len;
+        try {
+            len = Long.parseLong(s.getHeaders().get("content-length"));
+        } catch (Exception e) {
+            return json(400, err("Content-Length required (raw glb body)"));
+        }
+        ModelRepository.AnimUploadResult r = repo.addAnimation(modelName, animName,
+            s.getInputStream(), len);
+        JSONObject o = new JSONObject()
+            .put("ok", true)
+            .put(r.replaced ? "replaced" : "added", animName)
+            .put("duration_s", (double) r.durationS)
+            .put("animations", toJson(r.descriptor, false, false).getJSONArray("animations"));
+        boolean reloading = modelName.equals(LAppMinimumLive2DManager.peekCurrentModel());
+        if (reloading) {
+            repo.setSelected(modelName);
+            LAppMinimumDelegate.getInstance().post(new Runnable() {
+                @Override
+                public void run() {
+                    LAppMinimumLive2DManager.getInstance().loadModel(modelName);
+                }
+            });
+            o.put("reloading", true);
+        }
+        Response resp = json(r.replaced ? 200 : 201, o);
+        resp.addHeader("Connection", "close");
+        return resp;
     }
 
     private Response upload(IHTTPSession s, ModelRepository repo) throws Exception {

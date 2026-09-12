@@ -67,14 +67,14 @@ def pick_armature():
     return max(votes.items(), key=lambda kv: kv[1])[0]
 
 
-def export_glb(path):
+def export_glb(path, anim_mode="ACTIONS"):
     opts = {
         "filepath": path,
         "export_format": "GLB",
         "export_apply": True,
         "export_cameras": False,
         "export_lights": False,
-        "export_animation_mode": "ACTIONS",
+        "export_animation_mode": anim_mode,
         "export_optimize_animation_size": False,
     }
     props = bpy.ops.export_scene.gltf.get_rna_type().properties.keys()
@@ -89,6 +89,60 @@ def action_compatible_slot(act, arm):
             if slot.target_id_type == "OBJECT":
                 return slot
     return None
+
+
+def merge_gltf_animations(path, name):
+    """SCENE/ACTIONS 模式会按来源 ID 拆成多条 glTF 动画（骨骼一条、形态键一条）。
+    设备端约定单文件单动画：把所有动画的 channel/sampler 并入第一条并更名。
+    纯 JSON 手术，BIN chunk 与 accessor 引用原样不动。"""
+    import json as _json
+    import struct as _struct
+    with open(path, "rb") as f:
+        data = f.read()
+    jlen, = _struct.unpack_from("<I", data, 12)
+    js = _json.loads(data[20:20 + jlen].decode("utf-8"))
+    anims = js.get("animations", [])
+    if len(anims) <= 1:
+        if anims:
+            anims[0]["name"] = name
+            _rewrite_glb(path, data, js)
+        return
+    base = anims[0]
+    for extra in anims[1:]:
+        off = len(base["samplers"])
+        for sm in extra.get("samplers", []):
+            base["samplers"].append(sm)
+        for ch in extra.get("channels", []):
+            ch = dict(ch)
+            ch["sampler"] = ch["sampler"] + off
+            base["channels"].append(ch)
+    base["name"] = name
+    js["animations"] = [base]
+    _rewrite_glb(path, data, js)
+    log("merged %d animations -> 1 (%d channels)" % (
+        len(anims), len(base["channels"])))
+
+
+def _rewrite_glb(path, old_data, js):
+    import json as _json
+    import struct as _struct
+    jlen, = _struct.unpack_from("<I", old_data, 12)
+    bin_off = 20 + jlen
+    bin_len, = _struct.unpack_from("<I", old_data, bin_off)
+    bin_chunk = old_data[bin_off + 8: bin_off + 8 + bin_len]
+    jbytes = _json.dumps(js, separators=(",", ":")).encode("utf-8")
+    if len(jbytes) % 4:
+        jbytes += b" " * (4 - len(jbytes) % 4)
+    total = 12 + 8 + len(jbytes) + 8 + len(bin_chunk)
+    with open(path, "wb") as f:
+        f.write(b"glTF")
+        f.write(_struct.pack("<II", 2, total))
+        f.write(_struct.pack("<I", len(jbytes)))
+        f.write(b"JSON")
+        f.write(jbytes)
+        f.write(_struct.pack("<I", len(bin_chunk)))
+        f.write(b"BIN\x00")
+        f.write(bin_chunk)
 
 
 def main():
@@ -151,14 +205,42 @@ def main():
             print("[blend_export_worker] ERROR: no OBJECT slot in action " + action_name,
                   file=sys.stderr)
             sys.exit(2)
-        # 动作文件只保留骨架：移除全部网格对象后再导出（导出器按整个场景输出，
-        # 不移除会把网格/材质/贴图整份重复进每个动作文件；worker 每次调用独立
-        # 开 blend 且不保存，删除是安全的）。设备端按节点名绑定动画，网格节点
-        # 消失不影响。
-        for ob in [o for o in list(bpy.context.scene.objects) if o.type == "MESH"]:
-            bpy.data.objects.remove(ob)
-        export_glb(out_path)
-        log("anim %s written (skeleton-only): %s" % (action_name, out_path))
+        # 形态键烘焙：表情链路（自定义属性→驱动器→shape key）exporter 采不到，
+        # 按帧求值后显式插入 fcurve，导出器才能输出 weights 通道
+        scene = bpy.context.scene
+        r0, r1 = act.frame_range
+        scene.frame_start = int(r0)
+        scene.frame_end = max(scene.frame_start, int(-(-r1 // 1)))
+        mesh_obs = [ob for ob in scene.objects
+                    if ob.type == "MESH" and ob.data.shape_keys]
+        for ob in mesh_obs:
+            ob.data.shape_keys.animation_data_clear()
+        for f in range(scene.frame_start, scene.frame_end + 1):
+            scene.frame_set(f)
+            bpy.context.view_layer.update()
+            for ob in mesh_obs:
+                for kb in ob.data.shape_keys.key_blocks:
+                    if kb.name != "Basis":
+                        kb.keyframe_insert(data_path="value", frame=f)
+        baked = sum(len(ob.data.shape_keys.key_blocks) - 1 for ob in mesh_obs)
+        log("baked %d shape keys over frames [%d,%d]" % (
+            baked, scene.frame_start, scene.frame_end))
+        # 注意：morph（weights）通道以网格节点为目标，网格对象必须保留在场景里，
+        # 不能为省体积剥掉（否则表情通道整体丢失）。
+        # 动作文件多为复制副本，网格对象名带 .NNN 后缀（Face.003），会与模型节点名
+        # （Face）对不上——剥掉 Blender 数字后缀
+        import re as _re
+        for ob in mesh_obs:
+            ob.name = _re.sub(r"\.\d{3}$", "", ob.name)
+        # SCENE 模式把骨骼动作与形态键动画合并成同一条 glTF 动画
+        # （ACTIONS 模式下两条 ID 各出一条动画，设备端约定单文件单动画）
+        for ob in bpy.data.objects:
+            ad = ob.animation_data
+            if ad is not None and ad.action is None:
+                ad.action = act  # 无动作对象挂上主动作，保证 SCENE 采样覆盖
+        export_glb(out_path, anim_mode="SCENE")
+        merge_gltf_animations(out_path, action_name)
+        log("anim %s written: %s" % (action_name, out_path))
         sys.exit(0)
 
     print("unknown mode: " + mode, file=sys.stderr)
