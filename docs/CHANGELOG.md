@@ -4,6 +4,24 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)。
 
+## [0.12] - 2026-09-12
+
+### Fixed
+
+* **嘴部渲染错乱（用户报"嘴角怪怪的"）根因 = 深度冲突**。投影近远平面原取 `near=dist/100`、`far=dist+radius*20`（比值约 800:1），16 位深度缓冲下模型处深度分辨率约 4e-3 单位，而嘴线/腮红这类**贴着皮肤的贴花几何**与皮肤间距小一个数量级 → 两者互相穿插，细线被皮肤切成点状（观感是一团粉色斑点）。收紧为 `near=dist-2.5r`、`far=dist+3r`（比值约 4:1）后嘴部恢复为连续细线，与 Blender 渲同一 model.glb 的结果一致。
+  * **排查方法（可复用）**：把设备包里的 `model.glb` 拉回 Mac，用 python 直接解 accessor（POSITION/TEXCOORD_0/索引）做理想光栅化 → 同数据是连续细线，排除资产/UV/贴图；比对 chr 贴图像素哈希与 UV 集合（V 翻转后 100% 一致）排除版本不符；打印 rest 调色板偏离单位阵（6.6e-7）排除蒙皮变形；最后落在深度精度。**教训：细线/贴花类特征被切成点状，优先怀疑深度精度而不是贴图过滤**。
+* **每帧矩阵重建顺序错误（动作延迟一帧 / 停不下来）**：`node.local` 只在 `resetPose()` 里由 t/r/s 重建，而 `L3dClip.apply` 是在其后才写 t/r/s → 实际渲染的是**上一帧姿态**（50fps 下肉眼难辨，故一直没暴露）；且 `resetPose` 没有 rest 快照（t/r/s 被动作就地改写，"重置"等于把当前值再写一遍）→ 停动作不回落 rest、剪辑未覆盖的节点残留旧值。改为：`resetPose` 只负责把 rest 快照写回 t/r/s，`updateGlobals()` 开头统一 `buildLocals()` 重建 local（顺序 reset → apply → buildLocals → globals）。
+* **贴图采样质量**：原为 `NEAREST` 且无 mipmap——脸在屏上仅 ~60px 而贴图 512²，属重度缩小采样，细线特征易成锯齿。改为 `LINEAR` + `LINEAR_MIPMAP_LINEAR`；**mip 链在 CPU 侧逐级 Bitmap 缩放后按 level 上传**（本机驱动 `glGenerateMipmap` 实测不生效，与既有三个驱动坑同类）；`vUv` 提升为 `highp`（mediump 在 512² 上 UV 量化误差约 0.5 texel）。
+* 新增加载期诊断日志 `restPaletteDev`（rest 调色板偏离单位阵的最大值，应 ≈0）。
+
+### Changed
+
+* 设备包资产清理为**单动作**：`anims/` 仅保留 `eve_208010101_full_face`（2.03s 待机循环，含循环开头一次轻眨眼），`default_animation` 同此；原有 5 个动作（Binding_Check / eve_117010202 / eve_117010202_skirt_avoidance / eve_559010221 / eve_559010221_full_face）已移除，删前备份于 Mac（`/tmp/l3d_backup_anims`）。
+
+### Verified
+
+* 真机：嘴部为连续细线（对照 Blender 同文件渲染）；待机动作姿势逐帧变化且无延迟；49fps 无回归；切 Live2D（21miku）渲染正常 21.9fps。
+
 ## [0.11] - 2026-09-12
 
 ### Fixed

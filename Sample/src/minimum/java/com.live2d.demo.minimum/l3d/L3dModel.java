@@ -19,7 +19,8 @@ import static android.opengl.GLES20.GL_ARRAY_BUFFER;
 import static android.opengl.GLES20.GL_CLAMP_TO_EDGE;
 import static android.opengl.GLES20.GL_ELEMENT_ARRAY_BUFFER;
 import static android.opengl.GLES20.GL_FLOAT;
-import static android.opengl.GLES20.GL_NEAREST;
+import static android.opengl.GLES20.GL_LINEAR;
+import static android.opengl.GLES20.GL_LINEAR_MIPMAP_LINEAR;
 import static android.opengl.GLES20.GL_RGBA;
 import static android.opengl.GLES20.GL_TEXTURE0;
 import static android.opengl.GLES20.GL_TEXTURE_2D;
@@ -82,9 +83,12 @@ final class L3dModel {
         int parent = -1;
         int[] children = new int[0];
         int mesh = -1;
-        final float[] t = new float[3];                 // rest TRS（无动作时的姿态）
+        final float[] t = new float[3];                 // 当前 TRS（动作写入这里）
         final float[] r = new float[4];
         final float[] s = new float[3];
+        final float[] restT = new float[3];             // rest TRS 快照（resetPose 的唯一来源）
+        final float[] restR = new float[4];
+        final float[] restS = new float[3];
         boolean restIsMatrix;                           // glTF node 用 matrix 代替 TRS
         final float[] restMatrix = new float[16];
         final float[] local = new float[16];
@@ -223,6 +227,10 @@ final class L3dModel {
                 nd.restIsMatrix = true;
                 for (int c = 0; c < 16; c++) nd.restMatrix[c] = (float) m.optDouble(c, 0);
             }
+            // rest TRS 快照：node.t/r/s 会被动作就地改写，resetPose 只能从这里还原
+            System.arraycopy(nd.t, 0, nd.restT, 0, 3);
+            System.arraycopy(nd.r, 0, nd.restR, 0, 4);
+            System.arraycopy(nd.s, 0, nd.restS, 0, 3);
             nd.mesh = n.optInt("mesh", -1);
             nodes[i] = nd;
         }
@@ -514,6 +522,23 @@ final class L3dModel {
         model.resetPose();
         model.updateGlobals();
         model.recomputeBounds(glb);
+        // 一次性诊断：rest 调色板应等于单位阵（global × inverseBind），偏离说明 rest 解析/蒙皮有误
+        if (skin != null) {
+            float worst = 0f;
+            int worstJ = -1;
+            for (int ji = 0; ji < skin.joints.length; ji++) {
+                if (jointWeighted != null && !jointWeighted[ji]) continue;
+                for (int c = 0; c < 16; c++) {
+                    float expect = (c % 5 == 0) ? 1f : 0f;
+                    float d = Math.abs(model.jointPalette[ji * 16 + c] - expect);
+                    if (d > worst) {
+                        worst = d;
+                        worstJ = ji;
+                    }
+                }
+            }
+            Log.i(TAG, "restPaletteDev max=" + worst + " at joint " + worstJ);
+        }
         int morphMeshes = 0, morphTargets = 0;
         for (Mesh m : meshes) {
             if (m.targetCount > 0) {
@@ -533,16 +558,37 @@ final class L3dModel {
         return v[0] + "," + v[1] + "," + v[2];
     }
 
+    /**
+     * 贴图上传：mipmap + 线性过滤。
+     * 模型在屏上只有百来像素宽（脸 ~60px）而贴图 512²，是重度缩小采样；细线特征
+     * （嘴线、睫毛）在缺 mip 时会被双线性采成"串珠/虚线"（设备上"嘴角怪怪的"就是这个，
+     * Blender 有 mip 所以是干净细线）。
+     *
+     * mip 链在 CPU 侧逐级 Bitmap 缩放后按 level 上传，不用 glGenerateMipmap——
+     * 本机驱动已有三处静默失效前科（见 L3dRenderer 注释），实测 glGenerateMipmap
+     * 后细线仍是串珠，即 mip 未真正生效。
+     */
     private static int uploadTexture(Bitmap bm) {
         int[] tex = new int[1];
         glGenTextures(1, tex, 0);
         glBindTexture(GL_TEXTURE_2D, tex[0]);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
         glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
         if (bm != null) {
             GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, 0, bm, 0);
+            Bitmap prev = bm;
+            int level = 1;
+            while (prev.getWidth() > 1 && prev.getHeight() > 1) {
+                Bitmap half = Bitmap.createScaledBitmap(prev,
+                    Math.max(1, prev.getWidth() / 2), Math.max(1, prev.getHeight() / 2), true);
+                GLUtils.texImage2D(GLES20.GL_TEXTURE_2D, level, half, 0);
+                if (prev != bm) prev.recycle();
+                prev = half;
+                level++;
+            }
+            if (prev != bm) prev.recycle();
         } else {
             ByteBuffer white = ByteBuffer.allocateDirect(4);
             white.put(new byte[]{(byte) 255, (byte) 255, (byte) 255, (byte) 255});
@@ -565,6 +611,20 @@ final class L3dModel {
             }
         }
         for (Node nd : nodes) {
+            if (nd.restIsMatrix) continue;              // matrix 节点无 TRS 通道
+            System.arraycopy(nd.restT, 0, nd.t, 0, 3);
+            System.arraycopy(nd.restR, 0, nd.r, 0, 4);
+            System.arraycopy(nd.restS, 0, nd.s, 0, 3);
+        }
+    }
+
+    /**
+     * 把 node.t/r/s 重建成 local 矩阵。必须在动作写入 t/r/s（L3dClip.apply）之后、
+     * 算全局矩阵之前调用——否则动作用的是上一帧的姿态（曾依赖这一帧延迟"碰巧能看"，
+     * 修掉 rest 快照后就会整体冻在 rest）。
+     */
+    private void buildLocals() {
+        for (Node nd : nodes) {
             if (nd.restIsMatrix) {
                 System.arraycopy(nd.restMatrix, 0, nd.local, 0, 16);
             } else {
@@ -576,6 +636,7 @@ final class L3dModel {
     /** 动作应用后调用：只算需要节点（带权关节+祖先）的全局矩阵，再算带权关节调色板。 */
     void updateGlobals() {
         long g0 = globDbg >= 0 ? System.nanoTime() : 0;
+        buildLocals();
         if (topoNeeded != null) {
             for (int ti = 0; ti < topoNeeded.length; ti++) {
                 Node nd = nodes[topoNeeded[ti]];

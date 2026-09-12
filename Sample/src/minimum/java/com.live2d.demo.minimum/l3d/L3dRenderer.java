@@ -28,19 +28,28 @@ final class L3dRenderer {
     final int locBaseColor;
 
     L3dRenderer() {
+        // vUv 必须 highp：mediump 只有 10 位尾数，在 512² 贴图上 UV 量化误差 ≈0.5 texel，
+        // 会把 2 texel 高的细线特征（嘴线、睫毛）打断成串珠/虚线（本机实测；
+        // 同数据 CPU 光栅化是连续细线，Blender 亦然）。FRAGMENT_PRECISION_HIGH 未定义时
+        // 才退回 mediump。
         String vs =
             "precision highp float;\n"
             + "attribute vec3 aPosition;\n"
             + "attribute vec2 aTexCoord;\n"
             + "uniform mat4 uMVP;\n"
-            + "varying vec2 vUv;\n"
+            + "varying highp vec2 vUv;\n"
             + "void main() {\n"
             + "  gl_Position = uMVP * vec4(aPosition, 1.0);\n"
             + "  vUv = aTexCoord;\n"
             + "}\n";
         String fs =
-            "precision mediump float;\n"
-            + "varying vec2 vUv;\n"
+            "#ifdef GL_FRAGMENT_PRECISION_HIGH\n"
+            + "precision highp float;\n"
+            + "varying highp vec2 vUv;\n"
+            + "#else\n"
+            + "precision mediump float;\n"
+            + "varying mediump vec2 vUv;\n"
+            + "#endif\n"
             + "uniform sampler2D uBaseTex;\n"
             + "uniform vec4 uBaseColor;\n"
             + "uniform int uHasTex;\n"

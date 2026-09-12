@@ -185,8 +185,17 @@ public final class L3dScene {
         float aspect = (float) width / (float) Math.max(1, height);
 
         float[] proj = projScratch;
-        L3dMat.perspective(proj, FOV_RAD, aspect, Math.max(dist / 100f, radius / 100f),
-            dist + radius * 20f);
+        // 近远平面必须贴住模型：原实现 near=dist/100、far=dist+radius*20（比值 ~800:1），
+        // 在 16 位深度缓冲下模型处深度分辨率约 4e-3 单位，比贴花偏移量大一个量级——
+        // 嘴线/腮红这类贴着皮肤的贴花几何与皮肤互相穿插，细线被打成点状
+        // （CPU 按同数据光栅化是连续细线、Blender 亦然）。放宽到 zoom 极限也够用的边距。
+        float near = Math.max(dist - radius * 2.5f, radius * 0.05f);
+        float far = dist + radius * 3f;
+        if (!(near > 0f) || !(far > near + 1e-3f)) {
+            near = Math.max(dist * 0.5f, 0.1f);
+            far = dist + radius * 3f;
+        }
+        L3dMat.perspective(proj, FOV_RAD, aspect, near, far);
         float[] view = viewScratch;
         L3dMat.identity(view);
         view[12] = -cx;
