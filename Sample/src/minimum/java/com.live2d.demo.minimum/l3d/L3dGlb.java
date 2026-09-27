@@ -146,13 +146,16 @@ public final class L3dGlb {
             JSONObject val = sparse.getJSONObject("values");
             int sc = sparse.getInt("count");
             int idxCT = idx.getInt("componentType");
-            int idxE = idxCT == 5125 ? 4 : 2;
+            // indices 允许 UNSIGNED_BYTE(5121)/SHORT(5123)/INT(5125)；Blender 对顶点数少
+            // 的形态键会写 ubyte，按 short 读会越界（"sparse index out of range"）。
+            int idxE = idxCT == 5125 ? 4 : idxCT == 5123 ? 2 : 1;
             ByteBuffer ib = view(idx.getInt("bufferView"), idx.optInt("byteOffset", 0),
                 idxE, sc);
             ByteBuffer vb = view(val.getInt("bufferView"), val.optInt("byteOffset", 0),
                 nc * 4, sc);
             for (int i = 0; i < sc; i++) {
-                int bi = idxE == 4 ? ib.getInt() : ib.getShort() & 0xFFFF;
+                int bi = idxE == 4 ? ib.getInt()
+                    : idxE == 2 ? (ib.getShort() & 0xFFFF) : (ib.get() & 0xFF);
                 if (bi < 0 || bi >= n) throw new L3dException("sparse index out of range");
                 for (int c = 0; c < nc; c++) out[bi * nc + c] = vb.getFloat();
             }
