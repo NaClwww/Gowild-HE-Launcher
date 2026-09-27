@@ -47,7 +47,7 @@ LJT_DIR=/path/to/libjpeg-turbo-3.0.4 \
 tools/build-native.sh
 ```
 
-产物落到 `Sample/src/main/jniLibs/armeabi-v7a/libnv21jpeg.so`，gradle 会直接打包。
+产物落到 `app/src/main/jniLibs/armeabi-v7a/libnv21jpeg.so`，gradle 会直接打包。
 
 ### 工具链上的两个坑（本次踩过）
 
@@ -68,8 +68,8 @@ tools/build-native.sh
 LJT=/path/to/libjpeg-turbo-3.0.4
 cmake -S $LJT -B /tmp/ljt-host -DCMAKE_POLICY_VERSION_MINIMUM=3.5 -DENABLE_SHARED=FALSE
 cmake --build /tmp/ljt-host -j8
-cc -O2 -o /tmp/t tools/test_nv21jpeg.c Sample/src/main/jni/nv21_jpeg_core.c \
-   -I$LJT -I/tmp/ljt-host -I Sample/src/main/jni /tmp/ljt-host/libjpeg.a
+cc -O2 -o /tmp/t tools/test_nv21jpeg.c app/src/main/jni/nv21_jpeg_core.c \
+   -I$LJT -I/tmp/ljt-host -I app/src/main/jni /tmp/ljt-host/libjpeg.a
 /tmp/t /tmp/nv21out   # 生成若干测试 JPEG，用 djpeg 解码核对方向与红蓝
 ```
 

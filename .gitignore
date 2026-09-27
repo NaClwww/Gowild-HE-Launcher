@@ -22,10 +22,10 @@ apks/
 
 # Live2D 官方示例模型先不入库（本地保留可继续开发）；上游来源：
 # https://github.com/Live2D/CubismJavaSamples 的 Sample/src/main/assets/
-Sample/src/main/assets/Hiyori/
-Sample/src/main/assets/Mao/
-Sample/src/main/assets/Mark/
-Sample/src/main/assets/Natori/
-Sample/src/main/assets/Rice/
-Sample/src/main/assets/Haru/
-Sample/src/main/assets/Wanko/
+app/src/main/assets/Hiyori/
+app/src/main/assets/Mao/
+app/src/main/assets/Mark/
+app/src/main/assets/Natori/
+app/src/main/assets/Rice/
+app/src/main/assets/Haru/
+app/src/main/assets/Wanko/

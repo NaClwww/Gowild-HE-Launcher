@@ -47,13 +47,13 @@ Live2D models listed below are available under Free Material License.
 * [无偿提供素材使用授权协议](https://www.live2d.com/eula/live2d-free-material-license-agreement_cn.html)
 
 ```
-Sample/src/main/assets/Haru
-Sample/src/main/assets/Hiyori
-Sample/src/main/assets/Mao
-Sample/src/main/assets/Mark
-Sample/src/main/assets/Natori
-Sample/src/main/assets/Rice
-Sample/src/main/assets/Wanko
+app/src/main/assets/Haru
+app/src/main/assets/Hiyori
+app/src/main/assets/Mao
+app/src/main/assets/Mark
+app/src/main/assets/Natori
+app/src/main/assets/Rice
+app/src/main/assets/Wanko
 ```
 
 If you use these models, you must agree to the terms of a contract set [here](https://docs.live2d.com/cubism-editor-manual/sample-model/) for each model.

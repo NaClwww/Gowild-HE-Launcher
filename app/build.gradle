@@ -7,7 +7,8 @@ android {
     compileSdk PROP_COMPILE_SDK_VERSION.toInteger()
 
     defaultConfig {
-        applicationId "com.live2d.demo"
+        // 保持与旧 Minimum flavor 相同的包名，设备上可直接覆盖升级
+        applicationId "com.live2d.demo.minimum"
         minSdkVersion PROP_MIN_SDK_VERSION
         targetSdkVersion PROP_TARGET_SDK_VERSION
         versionCode 1
@@ -40,21 +41,9 @@ android {
         }
     }
 
-    flavorDimensions = ["mode"]
-    productFlavors {
-        Full {
-            dimension = "mode"
-            applicationId "com.live2d.demo"
-        }
-        Minimum {
-            dimension = "mode"
-            applicationId = "com.live2d.demo.minimum"
-        }
-    }
-
     compileOptions {
-        sourceCompatibility JavaVersion.VERSION_1_7
-        targetCompatibility JavaVersion.VERSION_1_7
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
     }
     lint {
         abortOnError false
