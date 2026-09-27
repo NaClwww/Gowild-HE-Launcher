@@ -19,3 +19,13 @@ local.properties
 
 # 本地构建产物（APK 走 GitHub Releases，不入库）
 apks/
+
+# Live2D 官方示例模型先不入库（本地保留可继续开发）；上游来源：
+# https://github.com/Live2D/CubismJavaSamples 的 Sample/src/main/assets/
+Sample/src/main/assets/Hiyori/
+Sample/src/main/assets/Mao/
+Sample/src/main/assets/Mark/
+Sample/src/main/assets/Natori/
+Sample/src/main/assets/Rice/
+Sample/src/main/assets/Haru/
+Sample/src/main/assets/Wanko/
