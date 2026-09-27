@@ -47,7 +47,9 @@ public class CameraController {
 
     private HandlerThread cameraThread;
     private Handler cameraHandler;
-    private Camera camera;
+    private volatile Camera camera;
+    /** Local analysis owns a camera lease, but is NOT a JPEG/stream consumer. */
+    private volatile boolean trackingRequested;
     /** GL 线程创建的假预览屏（有真实 EGL 上下文）；老 HAL 无 preview surface 时回调不出帧。 */
     private volatile android.graphics.SurfaceTexture previewSink;
     private volatile boolean explicitOn = false;
@@ -159,6 +161,30 @@ public class CameraController {
 
     /** 打开（隐式或显式）。成功返回 true；失败置 lastError。 */
     public boolean turnOn(boolean explicit) {
+        return turnOn(explicit, false);
+    }
+
+    boolean turnOnForTracking() {
+        return turnOn(false, true);
+    }
+
+    void setTrackingRequested(boolean requested) {
+        trackingRequested = requested;
+        if (!requested && camera != null) {
+            ensureThread();
+            cameraHandler.post(new Runnable() {
+                @Override public void run() {
+                    if (!trackingRequested && !explicitOn && clients.get() == 0 && !framesWanted())
+                        closeOnThread();
+                }
+            });
+        }
+    }
+
+    public boolean isTrackingRequested() { return trackingRequested; }
+
+    private boolean turnOn(boolean explicit, final boolean trackingOnly) {
+        if (trackingOnly && (!trackingRequested || !FaceTracker.get().wantsCamera())) return false;
         if (scanActive) {
             lastError = "camera busy: scan session";
             return false; // 扫码独占期间拒绝一切隐式/显式开启
@@ -185,7 +211,9 @@ public class CameraController {
             @Override
             public void run() {
                 try {
-                    openOnThread();
+                    // A tracking request can be cancelled while waiting for renderer warm-up.
+                    if (!scanActive && (!trackingOnly || (trackingRequested && FaceTracker.get().wantsCamera())))
+                        openOnThread();
                 } finally {
                     latch.countDown();
                 }
@@ -209,7 +237,7 @@ public class CameraController {
     /** 关闭（显式关立即生效；隐式空闲超时由 onPreviewFrame 自查）。 */
     public void turnOff(boolean explicit) {
         if (explicit) explicitOn = false;
-        if (camera == null) return;
+        if (camera == null && !starting) return;
         ensureThread();
         cameraHandler.post(new Runnable() {
             @Override
@@ -343,6 +371,7 @@ public class CameraController {
         // 必须已经能看到“这轮关闭已发生”，否则会在窗口期隐式重开、复活摄像头
         generation++;
         camera = null;
+        FaceTracker.get().cameraClosed();
         try {
             cam.setPreviewCallbackWithBuffer(null);
             cam.stopPreview();
@@ -360,10 +389,12 @@ public class CameraController {
     /** 相机回调线程：空闲看门狗 + 限频 + NV21 翻转 → JPEG。 */
     private void handleFrame(byte[] data, Camera cam) {
         long now = System.nanoTime();
-        if (!explicitOn && clients.get() == 0 && now - lastUseNanos > AUTO_OFF_NANOS) {
+        if (!explicitOn && !trackingRequested && clients.get() == 0 && now - lastUseNanos > AUTO_OFF_NANOS) {
             closeOnThread();
             return;
         }
+        // Independent of JPEG demand/rate. offer() samples only when the detector is ready.
+        FaceTracker.get().offer(data, width, height, FLIP_V, FLIP_H);
         if (!framesWanted()) {
             cam.addCallbackBuffer(data);
             return;

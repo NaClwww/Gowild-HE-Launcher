@@ -15,6 +15,7 @@ import android.view.MotionEvent;
 
 import com.live2d.demo.minimum.control.CameraController;
 import com.live2d.demo.minimum.control.ControlServer;
+import com.live2d.demo.minimum.control.FaceTracker;
 
 import java.io.IOException;
 
@@ -68,12 +69,14 @@ public class MainActivityMinimum extends Activity {
     protected void onResume() {
         super.onResume();
         _glSurfaceView.onResume();
+        FaceTracker.get().resume(this);
     }
 
     @Override
     protected void onPause() {
         super.onPause();
 
+        FaceTracker.get().pause();
         _glSurfaceView.onPause();
     }
 
@@ -113,6 +116,7 @@ public class MainActivityMinimum extends Activity {
 
     @Override
     public boolean onTouchEvent(MotionEvent event) {
+        FaceTracker.get().manualOverride();
         float pointX = event.getX();
         float pointY = event.getY();
 

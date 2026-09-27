@@ -48,6 +48,20 @@ public class ControlServer extends NanoHTTPD {
             return status();
         }
 
+        // Configuration remains available with a cold renderer or a 3D model selected.
+        if (uri.equals("/api/control/tracking")) {
+            if (method == Method.GET) return ok(FaceTracker.get().status());
+            if (method == Method.POST) {
+                try {
+                    FaceTracker.get().configure(new JSONObject(readBody(s)));
+                } catch (org.json.JSONException | IllegalArgumentException e) {
+                    return json(400, err(e.getMessage()));
+                }
+                return ok(FaceTracker.get().status());
+            }
+            return methodNotAllowed("GET, POST");
+        }
+
         if (uri.startsWith("/api/control/")) {
             return control(uri, s, method);
         }
@@ -211,6 +225,7 @@ public class ControlServer extends NanoHTTPD {
                 if (on) {
                     if (!cam.turnOn(true)) return json(503, err(cam.getLastError() != null ? cam.getLastError() : "camera open failed"));
                 } else {
+                    FaceTracker.get().disable(); // Explicit camera-off must not be undone by tracking.
                     cam.turnOff(true);
                 }
                 return cameraStatus(cam);
@@ -263,6 +278,7 @@ public class ControlServer extends NanoHTTPD {
             .put("on", cam.isOn())
             .put("explicit", cam.isExplicitOn())
             .put("clients", cam.getClientCount())
+            .put("tracking", cam.isTrackingRequested())
             .put("width", cam.getWidth())
             .put("height", cam.getHeight())
             .put("fps", cam.getTargetFps())
@@ -621,9 +637,11 @@ public class ControlServer extends NanoHTTPD {
                 return json(400, err("invalid JSON body"));
             }
             if (in.optBoolean("reset", false)) {
+                FaceTracker.get().manualOverride();
                 manager.lookAtReset();
             } else {
                 if (!in.has("x") && !in.has("y")) return json(400, err("need x/y or reset:true"));
+                FaceTracker.get().manualOverride();
                 manager.lookAt((float) in.optDouble("x", manager.getLookX()),
                     (float) in.optDouble("y", manager.getLookY()));
             }

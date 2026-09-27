@@ -4,6 +4,16 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)。
 
+## [Unreleased]
+
+### Added
+
+* Live2D 本地人脸随动：`/api/control/tracking` 开关与持久化配置；单线程 NEON YuNet 原生检测，
+  原始 NV21 按需缩小采样、忙时丢帧、CPU 时间预算自适应降频、无人低频扫描。
+* 保留旧 backend 的平滑 / 死区 / 丢脸保持 / 随机游走；扫码和后台暂停，触摸或外部 lookat 临时接管。
+* 随动状态、CPU 耗时与 FPS 指标、只读性能采样脚本、原生重建脚本与 host 检查。
+  默认关闭；真机效果和 CPU 开销待验收，详见 `docs/LOCAL_FACE_TRACKING.md`。
+
 ## [1.0] - 2026-09-27
 
 ### Changed

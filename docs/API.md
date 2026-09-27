@@ -368,6 +368,12 @@ curl "$BASE/api/control/lipsync"
 
 ### 6.6 视线/头随动 — `GET|POST /api/control/lookat`
 
+本地人脸随动由 `GET|POST /api/control/tracking` 控制，默认关闭、配置持久化。
+例如 `POST {"enabled":true,"input_width":192,"max_fps":5,"cpu_budget_ms":80}`。
+此端点不要求当前 GL 或 Live2D 就绪；实际追踪只在前台 Live2D 模型上运行。
+POST lookat 或触摸会接管本地随动 5 秒；`POST /api/camera {"on":false}` 同时关闭本地追踪。
+参数、状态字段和 CPU 测量见 [本地人脸随动](LOCAL_FACE_TRACKING.md)。
+
 ```bash
 curl -X POST -d '{"x":-0.7,"y":0.4}' "$BASE/api/control/lookat"
 curl -X POST -d '{"reset":true}'     "$BASE/api/control/lookat"
