@@ -1,4 +1,4 @@
-# live2d_luncher 设备端控制面 API
+# Gowild-HE-Launcher 设备端控制面 API
 
 | | |
 |---|---|
@@ -6,9 +6,9 @@
 | **更新日期** | 2026-09-12 |
 | **服务端口** | `8900`（HTTP，设备端常驻，随 app 前台启停） |
 | **实测环境** | la0920 智能音箱 · Android 5.1.1 (API 22) · armeabi-v7a · 型号 C2-CMCC |
-| **实现** | NanoHTTPD 2.3.1，`Sample/src/minimum/java/com.live2d.demo.minimum/control/` |
+| **实现** | NanoHTTPD 2.3.1，`app/src/main/java/com/live2d/demo/minimum/control/` |
 
-本文档是 `live2d_luncher` 设备端 HTTP 控制面的完整参考。所有端点均在真机实测通过。
+本文档是 Gowild-HE-Launcher 设备端 HTTP 控制面的完整参考。所有端点均在真机实测通过。
 
 ---
 
@@ -154,7 +154,7 @@ model.glb                网格 + 骨架 rest + 蒙皮 + 贴图（无动画）
 anims/<动作>.glb          每个动作一个文件（骨架 + 单条 LINEAR 动画）
 ```
 
-包由 `tools/blend_to_model3d.py` 从 Blender 工程一键导出（Blender 无头模式：网格+骨架 rest 出 `model.glb`，逐动作各出 `anims/<名>.glb`——即"1 个模型 + n 个动作骨骼"，加动作不用重传模型）。设备端约定：动作名 = 文件名主干；`default_animation`（导出器自动取名为 `idle*` 的动作）在模型上屏时自动循环播放；动画按需懒加载。
+包由模型转换工程（myHupo）从 Blender 一键导出（导出脚本不在本仓库）（Blender 无头模式：网格+骨架 rest 出 `model.glb`，逐动作各出 `anims/<名>.glb`——即"1 个模型 + n 个动作骨骼"，加动作不用重传模型）。设备端约定：动作名 = 文件名主干；`default_animation`（导出器自动取名为 `idle*` 的动作）在模型上屏时自动循环播放；动画按需懒加载。
 
 ### 5.1 `GET /api/models` — 列出全部模型
 
@@ -243,7 +243,7 @@ curl -X POST --data-binary @eve_559010221.glb \
 # 200 {"ok":true,"replaced":"...","reloading":true}   （同名动作替换）
 ```
 
-- **Body 为动作 glb 整文件**（骨架 + 单条动画；建议用 `tools/blend_export_worker.py anim` 导出）。
+- **Body 为动作 glb 整文件**（骨架 + 单条动画；由转换工程导出）。
 - `?name=` 必填：动作名（合法字符同模型名），播放时即用此名。
 - 服务端校验：glTF 魔数、**恰好 1 条动画**、所有通道目标节点名必须存在于该模型 `model.glb`（骨架不匹配直接 400，如 `animation targets unknown nodes (rig mismatch): [b1, ...]`）；上限 100MB。
 - 表情动画支持：动作可包含 morph（weights）通道——导出时 worker 会把"驱动器→形态键"链路按帧烘焙成显式 fcurve（见 CHANGELOG 0.10），眨眼/口型随动作播放。

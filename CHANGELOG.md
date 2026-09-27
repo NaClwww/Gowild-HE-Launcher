@@ -1,8 +1,23 @@
-# Changelog（live2d_luncher 项目）
+# Changelog（Gowild-HE-Launcher 项目）
 
-本项目自身的变更记录。上游 Cubism SDK 自带的记录与本项目的迭代无关，见 [`CHANGELOG.upstream.md`](CHANGELOG.upstream.md)。
+本项目自身的变更记录（曾用名 live2d_luncher）。上游 Cubism SDK 自带的记录与本项目的迭代无关，见 [`CHANGELOG.upstream.md`](CHANGELOG.upstream.md)。
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/en/1.0.0/)。
+
+## [1.0] - 2026-09-27
+
+### Changed
+
+* **项目独立化：剥离上游 demo 与模型转换管线，收敛为单一 launcher 工程**。
+  * 删除 `Sample/src/full/`（Cubism 官方完整版 demo）与双 flavor 构建（Full/Minimum），minimum 源码并入 `app/src/main/java/`，`Sample/` 更名 `app/`；应用名 "Demo" → "Gowild HE Launcher"，包名保持 `com.live2d.demo.minimum`（设备可直接覆盖升级）。
+  * 删除 `tools/` 下的 Blender 模型转换脚本（`blend_export_worker.py`、`blend_to_model3d.py`、`make_test_blend.py`、`l3d_retarget_anims.py`）——它们属于 myHupo 转换工程；`build-native.sh`（摄像头 native 库构建）、`light_rainbow.py`、`test_nv21jpeg.c` 保留。
+  * 删除 demo 专用模板资源（`Theme.Demo`/colors/`activity_main.xml`，无任何引用）。
+  * 构建入口 `assembleMinimumDebug` → `assembleDebug`。
+* **修复 Linux 构建静默丢源集**：flavor 源集目录为 `src/minimum`（小写），而 Gradle 按 flavor 名期望 `src/Minimum`；macOS/Windows 文件系统大小写不敏感故此前可用，Linux 上 manifest 与 java 全部不进 APK（空壳应用）。随 flavor 机制移除，此问题不复存在。
+
+### 等效性验证
+
+重排前后 APK 对比：manifest 二进制树、dex 类清单（仅少 3 个被删模板资源对应的 `R$color/R$layout/R$style`）、assets 与 `lib/armeabi-v7a` 字节级零差异；res 内容等价（资源 ID 重编号 + 移除模板项）。launcher 功能不变。
 
 ## [0.13] - 2026-09-19
 
