@@ -22,6 +22,8 @@ import java.io.IOException;
 
 public class MainActivityMinimum extends Activity {
     private static final String TAG = "MainActivityMinimum";
+    private static final String VOLUME_PREFS = "volume";
+    private static final String LAST_AUDIBLE_VOLUME = "last_audible_volume";
 
     private GLSurfaceView _glSurfaceView;
     private VolumeOverlayView _volumeOverlay;
@@ -156,6 +158,11 @@ public class MainActivityMinimum extends Activity {
             adjustMediaVolume(false);
             return true;
         }
+        if (keyCode == android.view.KeyEvent.KEYCODE_F3) {
+            // 长按产生的重复 DOWN 不应连续切换静音状态。
+            if (event.getRepeatCount() == 0) toggleMediaMute();
+            return true;
+        }
         return super.onKeyDown(keyCode, event);
     }
 
@@ -171,8 +178,35 @@ public class MainActivityMinimum extends Activity {
             0);
         int after = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC);
         int max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC);
-        _volumeOverlay.show(after, max);
+        if (after > 0) {
+            getSharedPreferences(VOLUME_PREFS, MODE_PRIVATE).edit()
+                .putInt(LAST_AUDIBLE_VOLUME, after).apply();
+        }
+        _volumeOverlay.show(after, max, false);
         Log.i(TAG, "volume " + (up ? "up" : "down") + ": " + before + " -> " + after);
+    }
+
+    private void toggleMediaMute() {
+        android.media.AudioManager am =
+            (android.media.AudioManager) getSystemService(AUDIO_SERVICE);
+        if (am == null) return;
+
+        int max = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC);
+        int before = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC);
+        int target;
+        if (before > 0) {
+            getSharedPreferences(VOLUME_PREFS, MODE_PRIVATE).edit()
+                .putInt(LAST_AUDIBLE_VOLUME, before).apply();
+            target = 0;
+        } else {
+            target = getSharedPreferences(VOLUME_PREFS, MODE_PRIVATE)
+                .getInt(LAST_AUDIBLE_VOLUME, Math.max(1, max / 3));
+            target = Math.max(1, Math.min(max, target));
+        }
+        am.setStreamVolume(android.media.AudioManager.STREAM_MUSIC, target, 0);
+        int after = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC);
+        _volumeOverlay.show(after, max, after == 0);
+        Log.i(TAG, "volume mute toggle: " + before + " -> " + after);
     }
 
     @Override

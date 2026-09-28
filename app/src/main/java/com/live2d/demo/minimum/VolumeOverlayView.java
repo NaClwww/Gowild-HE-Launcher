@@ -31,6 +31,7 @@ final class VolumeOverlayView extends View {
     private float level;
     private int volume;
     private int maximum = 1;
+    private boolean muted;
 
     VolumeOverlayView(Context context) {
         super(context);
@@ -39,13 +40,14 @@ final class VolumeOverlayView extends View {
         setClickable(false);
     }
 
-    void show(int current, int max) {
+    void show(int current, int max, boolean muted) {
         removeCallbacks(dismiss);
         animate().cancel();
         if (levelAnimator != null) levelAnimator.cancel();
 
         volume = current;
         maximum = Math.max(1, max);
+        this.muted = muted;
         float target = Math.max(0f, Math.min(1f, current / (float) maximum));
         levelAnimator = ValueAnimator.ofFloat(level, target);
         levelAnimator.setDuration(190);
@@ -135,7 +137,7 @@ final class VolumeOverlayView extends View {
         paint.setTextSize(dp(18));
         paint.setTypeface(android.graphics.Typeface.create("sans-serif-medium", 0));
         paint.setTextAlign(Paint.Align.RIGHT);
-        canvas.drawText(Math.round(volume * 100f / maximum) + "%",
+        canvas.drawText(muted ? "静音" : Math.round(volume * 100f / maximum) + "%",
             left + width - dp(23), centerY - (paint.ascent() + paint.descent()) / 2f, paint);
     }
 }
