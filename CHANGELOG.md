@@ -10,12 +10,13 @@
 
 * 触摸条 F3 静音键：一键将媒体音量设为 0，再按恢复此前档位；档位跨应用重启保存，音量提示条显示“静音”。
 * 音量键反馈：在模型画面上方显示跟随音量平滑变化的分段音量条和百分比，连续按键会刷新停留时间，闲置后淡出；独立叠层补偿设备投影的垂直翻转。
-* **触摸条"+/−"音量键适配**：`MainActivityMinimum.onKeyDown` 接住 tp-key F4（+）/F1（−）及 gpio/耳机口的 `VOLUME_UP/DOWN`，各调 `STREAM_MUSIC` 一档；不带 `FLAG_SHOW_UI`（系统音量面板经投影光路会上下镜像，静默调流）。键位语义对齐出厂 eve：反编译其 MainActivity sparse-switch 确认 F4→`ChangeVolume(true)`、F1→`ChangeVolume(false)`（发 Unity volume 模块）、F2=扫码（与本项目 0.6 起的行为互证）、F3=`Silent()`、F5=蓝牙配对/工厂测试组合键，A/B（29/30）为 USB 键盘等价调试键。真机实测（`input keyevent` 用符号名，本机 input 数字编号是旧表）：F1×3 音量 4→1，F4 / VOLUME_UP / VOLUME_DOWN 均按预期增减，重启后复验通过；物理 +/− 键的最终确认见 DEVICE.md「触摸条按键」。
 * Live2D 本地人脸随动：`/api/control/tracking` 开关与持久化配置；单线程 NEON YuNet 原生检测，
   原始 NV21 按需缩小采样、忙时丢帧、CPU 时间预算自适应降频、无人低频扫描。
 * 保留旧 backend 的平滑 / 死区 / 丢脸保持 / 随机游走；扫码和后台暂停，触摸或外部 lookat 临时接管。
 * 随动状态、CPU 耗时与 FPS 指标、只读性能采样脚本、原生重建脚本与 host 检查。
   默认关闭；真机效果和 CPU 开销待验收，详见 `docs/LOCAL_FACE_TRACKING.md`。
+* **触摸条"+/−"音量键适配**：`MainActivityMinimum.onKeyDown` 接住 tp-key F4（+）/F1（−）及 gpio/耳机口的 `VOLUME_UP/DOWN`，各调 `STREAM_MUSIC` 一档；不带 `FLAG_SHOW_UI`（系统音量面板经投影光路会上下镜像，静默调流）。键位语义对齐出厂 eve：反编译其 MainActivity sparse-switch 确认 F4→`ChangeVolume(true)`、F1→`ChangeVolume(false)`（发 Unity volume 模块）、F2=扫码（与本项目 0.6 起的行为互证）、F3=`Silent()`、F5=蓝牙配对/工厂测试组合键，A/B（29/30）为 USB 键盘等价调试键。真机实测（`input keyevent` 用符号名，本机 input 数字编号是旧表）：F1×3 音量 4→1，F4 / VOLUME_UP / VOLUME_DOWN 均按预期增减，重启后复验通过；物理 +/− 键的最终确认见 DEVICE.md「触摸条按键」。
+* **设备知识（详见 DEVICE.md 新增「触摸条按键」「adb 认证与隐形选择框陷阱」两节）**：tp-key 五键 F1–F5 全表；厂商魔改 adbd 重启后需 `auth:CRC32` 挑战应答；`adb install -r` 清默认桌面后弹的系统选择框在本机不渲染却抢焦点，画面定格形似死机，恢复命令 `am start -n com.live2d.demo.minimum/.MainActivityMinimum`，开机场景不受影响（BootReceiver 显式启动实测干净进桌面）。
 
 ## [1.0] - 2026-09-27
 
