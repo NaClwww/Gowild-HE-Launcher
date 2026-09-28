@@ -69,6 +69,8 @@ final class L3dModel {
     private final float[] materialColor;                // materialIdx*4 → rgba
     private final float[] sceneMin = new float[3];
     private final float[] sceneMax = new float[3];
+    private float frameMinZ;
+    private float frameMaxZ;
 
     // ---- CPU 蒙皮 ----
     private final float[] jointPalette;                 // 16*J 列主序（recomputeBounds 也用）
@@ -148,6 +150,8 @@ final class L3dModel {
         this.materialColor = matColor;
         System.arraycopy(minB, 0, sceneMin, 0, 3);
         System.arraycopy(maxB, 0, sceneMax, 0, 3);
+        frameMinZ = minB[2];
+        frameMaxZ = maxB[2];
         int n = skin != null ? skin.joints.length : 0;
         this.jointPalette = new float[16 * n];
         this.jointWeighted = jointWeighted;
@@ -161,6 +165,14 @@ final class L3dModel {
 
     float[] sceneMax() {
         return sceneMax;
+    }
+
+    float frameMinZ() {
+        return frameMinZ;
+    }
+
+    float frameMaxZ() {
+        return frameMaxZ;
     }
 
     int jointCount() {
@@ -708,7 +720,13 @@ final class L3dModel {
      * 调用）、单权重快速路径（免 4 权重累加）、最后一次性 buf.put 批量上传。
      */
     void skinFrame() {
-        if (skin == null) return;
+        float minZ = sceneMin[2];
+        float maxZ = sceneMax[2];
+        if (skin == null) {
+            frameMinZ = minZ;
+            frameMaxZ = maxZ;
+            return;
+        }
         final float[] pal = jointPalette;
         final int jointN = skin.joints.length;
         for (Mesh mesh : meshes) {
@@ -815,6 +833,10 @@ final class L3dModel {
                             z = cZ;
                         }
                     }
+                    if (!Float.isNaN(z) && !Float.isInfinite(z)) {
+                        if (z < minZ) minZ = z;
+                        if (z > maxZ) maxZ = z;
+                    }
                     out[o] = x;
                     out[o + 1] = y;
                     out[o + 2] = z;
@@ -836,6 +858,8 @@ final class L3dModel {
             }
         }
         glBindBuffer(GL_ARRAY_BUFFER, 0);
+        frameMinZ = minZ;
+        frameMaxZ = maxZ;
     }
         
     void draw(L3dRenderer r, float[] pvPose) {
@@ -972,6 +996,8 @@ final class L3dModel {
         }
         System.arraycopy(mn, 0, sceneMin, 0, 3);
         System.arraycopy(mx, 0, sceneMax, 0, 3);
+        frameMinZ = mn[2];
+        frameMaxZ = mx[2];
         // 蒙皮输出的合法性盒（中心 ± 对角范围×6）：出界顶点收缩到中心
         float cx = (mn[0] + mx[0]) / 2f;
         float cy = (mn[1] + mx[1]) / 2f;

@@ -495,7 +495,8 @@ public class ModelRepository {
             throw new ModelException(400, "animation targets unknown nodes (rig mismatch): " + missing);
         }
 
-        // 时长（采样时间轴 max-min）
+        // 时长（采样时间轴 max-min）；压缩动作的常量轨道只剩一帧，
+        // 因此优先采用导出器记录的完整时长。
         float duration = 0f;
         try {
             org.json.JSONObject anim = glb.obj(0, "animations");
@@ -510,6 +511,14 @@ public class ModelRepository {
                 }
             }
         } catch (Exception ignored) {
+        }
+        JSONObject extras = glb.obj(0, "animations").optJSONObject("extras");
+        if (extras != null && extras.has("duration_s")) {
+            double declared = extras.optDouble("duration_s", Double.NaN);
+            if (Double.isNaN(declared) || Double.isInfinite(declared) || declared < duration) {
+                throw new ModelException(400, "invalid animation duration");
+            }
+            duration = (float) declared;
         }
 
         // 写文件 + 更新 manifest（临时文件+rename，避免半写状态）

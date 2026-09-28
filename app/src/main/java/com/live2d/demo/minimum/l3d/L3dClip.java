@@ -116,6 +116,9 @@ final class L3dClip {
             }
             float[] t = glb.readFloats(sampler.getInt("input"));
             float[] v = glb.readFloats(sampler.getInt("output"));
+            if (t.length == 0) {
+                throw new L3dGlb.L3dException("empty animation sampler on clip " + name);
+            }
             int meshIdx = -1;
             int nc;
             if (path == PATH_W) {
@@ -126,8 +129,8 @@ final class L3dClip {
             } else {
                 nc = PATH_N[path];
             }
-            if (v.length < t.length * nc) {
-                throw new L3dGlb.L3dException("sampler output truncated on clip " + name);
+            if (v.length != t.length * nc) {
+                throw new L3dGlb.L3dException("sampler output size mismatch on clip " + name);
             }
             if (t.length > 0 && t[t.length - 1] > duration) duration = t[t.length - 1];
             targets[bound] = nodeIdx;
@@ -140,6 +143,16 @@ final class L3dClip {
         }
         if (bound == 0) {
             throw new L3dGlb.L3dException("no usable channels in clip " + name);
+        }
+        // Packed clips replace constant tracks with one key. Their last key can
+        // precede the actual end of the clip, so keep the exported duration.
+        org.json.JSONObject extras = anim.optJSONObject("extras");
+        if (extras != null && extras.has("duration_s")) {
+            double declared = extras.optDouble("duration_s", Double.NaN);
+            if (Double.isNaN(declared) || Double.isInfinite(declared) || declared < duration) {
+                throw new L3dGlb.L3dException("invalid animation duration on clip " + name);
+            }
+            duration = (float) declared;
         }
         if (clipDbg) {
             int tw = 0, twMesh = -1;
@@ -166,7 +179,7 @@ final class L3dClip {
             float[] ts = uniqTimes[u];
             int last = ts.length - 1;
             int seg;
-            if (t <= ts[0]) {
+            if (last == 0 || t <= ts[0]) {
                 seg = -1;
             } else if (t >= ts[last]) {
                 seg = last - 1;
@@ -232,7 +245,11 @@ final class L3dClip {
             default:
                 // 四元数 NLERP：本仓动作相邻帧角差小，等价 SLERP 的视觉精度
                 float x0 = vs[o], y0 = vs[o + 1], z0 = vs[o + 2], w0 = vs[o + 3];
-                float x1 = vs[o + 4], y1 = vs[o + 5], z1 = vs[o + 6], w1 = vs[o + 7];
+                // A packed constant rotation has only one key.
+                float x1 = o + 7 < vs.length ? vs[o + 4] : x0;
+                float y1 = o + 7 < vs.length ? vs[o + 5] : y0;
+                float z1 = o + 7 < vs.length ? vs[o + 6] : z0;
+                float w1 = o + 7 < vs.length ? vs[o + 7] : w0;
                 float d = x0 * x1 + y0 * y1 + z0 * z1 + w0 * w1;
                 if (d < 0f) {
                     x1 = -x1;

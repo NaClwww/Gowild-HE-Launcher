@@ -168,6 +168,12 @@ public final class L3dScene {
         model.updateGlobals();
         long a3 = prof ? System.nanoTime() : 0;
         if (prof) { perfReset += a1 - a0; perfApply += a2 - a1; perfGlobals += a3 - a2; }
+        final long perfT1 = prof ? System.nanoTime() : 0;
+        // The projection must use this frame's skinned vertices. A hand moving
+        // toward the camera can pass the rest-pose depth range and disappear.
+        long t0 = prof ? System.nanoTime() : 0;
+        model.skinFrame();
+        long t1 = prof ? System.nanoTime() : 0;
 
         // 相机：rest 包围盒自动取景（无旋转，看向 -Z）
         float[] mn = model.sceneMin();
@@ -185,18 +191,18 @@ public final class L3dScene {
         float aspect = (float) width / (float) Math.max(1, height);
 
         float[] proj = projScratch;
-        // 近远平面按模型"真实深度厚度"收：深度精度只取决于 near 与 z 跨度，
-        // 用取景球半径（含高度/宽度）会白扔一个量级的精度——贴得很近的表面
-        // （嘴线贴花、眼片 vs 眼睑）就会互相穿插。pose 只缩放 x/y（viewPose 不动 m[10]），
-        // 故 z 厚度与 zoom 无关，留 50% 余量即可。
-        float zHalf = Math.abs(mx[2] - mn[2]) * 0.5f;
-        if (Float.isInfinite(zHalf) || Float.isNaN(zHalf) || zHalf < radius * 1e-3f) {
-            zHalf = radius * 0.25f;
-        }
-        float half = zHalf + Math.max(zHalf * 0.5f, radius * 0.02f);
-        float near = Math.max(dist - half, half * 0.05f);
-        float far = dist + half;
-        if (!(near > 0f) || !(far > near + 1e-3f)) {
+        // view[14] = cz - dist, so a world-space z becomes depth dist - cz - z.
+        // Use the current skinned depth, with a small margin for interpolation.
+        // This keeps face decals precise without clipping limbs or hair that
+        // extend beyond the rest-pose box.
+        float frameMinZ = model.frameMinZ();
+        float frameMaxZ = model.frameMaxZ();
+        float pad = Math.max(radius * 0.05f, (frameMaxZ - frameMinZ) * 0.05f);
+        float near = dist - cz - frameMaxZ - pad;
+        float far = dist - cz - frameMinZ + pad;
+        if (Float.isNaN(near) || Float.isInfinite(near)
+            || Float.isNaN(far) || Float.isInfinite(far)
+            || !(near > radius * 0.02f) || !(far > near + 1e-3f)) {
             near = Math.max(dist - radius * 2.5f, radius * 0.05f);
             far = dist + radius * 3f;
         }
@@ -217,14 +223,10 @@ public final class L3dScene {
         L3dMat.mul(pose, pose, view);       // pose·V
         L3dMat.mul(proj, proj, pose);       // P·pose·V
 
-        final long perfT1 = perfDbg >= 0 ? System.nanoTime() : 0;
         GLES20.glEnable(GLES20.GL_DEPTH_TEST);
         GLES20.glDepthFunc(GLES20.GL_LEQUAL);
         renderer.resetAttribArrays();
         renderer.useProgram();
-        long t0 = perfDbg >= 0 ? System.nanoTime() : 0;
-        model.skinFrame();
-        long t1 = perfDbg >= 0 ? System.nanoTime() : 0;
         model.draw(renderer, proj);
         L3dRenderer.endFrame();
         if (perfDbg >= 0) {
