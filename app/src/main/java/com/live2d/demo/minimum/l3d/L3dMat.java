@@ -71,7 +71,7 @@ final class L3dMat {
         out[14] = 2f * far * near / (near - far);
     }
 
-    /** 视空间后变换：绕画面中心缩放（zoom 大 = 模型大）+ 平移（x 已乘纵横比，y+ 向上）。 */
+    /** 视空间后变换：绕画面中心缩放（zoom 大 = 模型大）+ 平移（x 已乘纵横比）。 */
     public static void viewPose(float[] out, float aspect, float x, float y, float zoom) {
         identity(out);
         out[0] = zoom;
@@ -80,8 +80,14 @@ final class L3dMat {
         out[13] = y;
     }
 
-    /** 垂直镜像（投影光路上颠补偿，与 Live2D 的 scaleRelative(1,-1) 同义）。 */
+    /**
+     * 垂直镜像 = 左乘 S(1,-1)（投影光路上下颠倒补偿）：线性部分（[5]）与
+     * 平移分量（[13]）一并翻转。只翻 [5] 会让 pose 的 y 平移逃过镜像，
+     * 导致 l3d 与 Live2D 的 pose y 物理方向相反（Live2D 行向量序 v·T·Z·F·A
+     * 中平移在翻转之前应用、同样被镜像）。
+     */
     public static void flipV(float[] out) {
         out[5] = -out[5];
+        out[13] = -out[13];
     }
 }

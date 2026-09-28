@@ -216,7 +216,8 @@ public final class L3dScene {
         // 复合矩阵 = P · pose · V（pose 是视空间操作，必须夹在 P 与 V 之间；
         // 曾错写成 P·V·pose，flip/zoom 作用在模型空间、再被相机平移推出视野）。
         // 全部 CPU 预乘：本机驱动误编译 mat4 长乘法链，见 L3dRenderer 注释。
-        // pose = flipV·zoom·translate；y+ 实体屏向上，flipV 补投影光路上下镜像。
+        // pose = flipV·zoom·translate；y+ 实体屏向上，flipV 补投影光路上下镜像
+        // （平移也被镜像翻转——只翻线性部分会让 l3d 的 pose y 与 Live2D 反向）。
         float[] pose = poseScratch;
         L3dMat.viewPose(pose, aspect, poseX, poseY, poseZoom);
         L3dMat.flipV(pose);

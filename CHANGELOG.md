@@ -6,6 +6,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+* **l3d 与 Live2D 的 pose y 物理方向相反**：`L3dMat.flipV` 只翻了矩阵线性部分（`[5]`），平移分量（`[13]`）逃过投影镜像，l3d 的 pose y+ 落在实体屏向下、与 Live2D（行向量序 v·T·Z·F·A，平移经镜像）及 API 文档 §3.4「y+ 实体屏向上」相反。改为整体左乘 S(1,-1)（线性 + 平移一并翻转）。真机验证：21miku（live2d）与 miku_eve（l3d）在 y −0.6 → +0.6 时画面亮度质心朝同方向移动（screencap 帧缓冲坐标）。
+
 ### Added
 
 * **屏幕亮度控制面 `/api/brightness`（GET 状态 / POST `{"value":1..255}` 夹紧）**：`GET /api/status` 增加 `brightness` 摘要。双层写入——窗口 `screenBrightness` 覆盖立即生效（全屏 HOME 应用，窗口即整块投影屏）+ `Settings.System.SCREEN_BRIGHTNESS` 系统级持久（manifest 补 `WRITE_SETTINGS`，API 22 安装时授予）；应用内 SharedPreferences 兜底，重启由 `MainActivityMinimum.onCreate` 挂接重放。窗口属性经 UI 线程投递，HTTP 线程不触碰 Window。`docs/API.md` v0.8：新增 §10，后续章节顺延。
