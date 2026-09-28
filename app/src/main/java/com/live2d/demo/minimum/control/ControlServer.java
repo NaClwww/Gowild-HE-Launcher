@@ -133,14 +133,22 @@ public class ControlServer extends NanoHTTPD {
     }
 
     /**
-     * /api/voice/{name}/*：语音采集（现阶段 name 只有 mic）。不依赖 GL。
+     * /api/voice/{name}/*：语音采集与播放。采集 name 只有 mic；播放走 play/*。
+     * 不依赖 GL。
      * GET /api/voice/{name} → 状态；POST → {"on":bool,"rate":8000..48000}；
      * POST /{name}/start、/{name}/stop；GET /{name}/stream → chunked PCM16LE mono（隐式开启）。
+     * 播放（对齐记录 #3，口型暂缓）：POST /play/begin {"rate","channels"} →
+     * POST /play/chunk（raw PCM16LE body，多次）→ POST /play/end；POST /play/stop 立即掐断。
      */
     private Response voice(String uri, IHTTPSession s, Method method) throws Exception {
         String rest = uri.substring("/api/voice/".length());
         String name = rest.contains("/") ? rest.substring(0, rest.indexOf('/')) : rest;
         String sub = rest.contains("/") ? rest.substring(rest.indexOf('/') + 1) : "";
+
+        if (name.equals("play")) {
+            return play(sub, s, method);
+        }
+
         VoiceController voice = VoiceController.get();
 
         if (!VoiceController.isKnownSource(name)) {
@@ -186,6 +194,85 @@ public class ControlServer extends NanoHTTPD {
         }
 
         return json(404, err("no voice route: " + sub + " (available: status, start, stop, stream)"));
+    }
+
+    /**
+     * /api/voice/play/*：TTS 下行播放（NanoHTTPD 不收 chunked 请求体，流式拆成
+     * 三段式分块上行）。begin 开会话（掐旧）、chunk 喂 PCM16LE、end 收口排空、
+     * stop 立即掐断。chunk 的阻塞入队即播放背压，反压调用方整条 TTS 链。
+     */
+    private Response play(String sub, IHTTPSession s, Method method) throws Exception {
+        VoicePlayer player = VoicePlayer.get();
+
+        if (sub.equals("") || sub.equals("status")) {
+            if (method == Method.GET) return ok(player.statusJson());
+            return methodNotAllowed("GET");
+        }
+
+        if (sub.equals("begin")) {
+            if (method != Method.POST) return methodNotAllowed("POST");
+            JSONObject in;
+            try {
+                in = new JSONObject(readBody(s));
+            } catch (Exception e) {
+                in = new JSONObject(); // 允许空 body（用默认 16k 单声道）
+            }
+            if (!player.begin(in.optInt("rate", 16000), in.optInt("channels", 1))) {
+                return json(503, err(player.statusJson().opt("last_error") != null
+                    ? player.statusJson().optString("last_error") : "playback start failed"));
+            }
+            return ok(player.statusJson());
+        }
+
+        if (sub.equals("chunk")) {
+            if (method != Method.POST) return methodNotAllowed("POST");
+            byte[] pcm = readRawBody(s, 2 << 20);
+            if (pcm == null) return json(400, err("Content-Length required (raw PCM body)"));
+            try {
+                if (!player.write(pcm)) {
+                    return json(409, err("no open playback session (begin first)"));
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return json(503, err("interrupted"));
+            }
+            return ok(player.statusJson());
+        }
+
+        if (sub.equals("end")) {
+            if (method != Method.POST) return methodNotAllowed("POST");
+            player.end();
+            return ok(player.statusJson());
+        }
+
+        if (sub.equals("stop")) {
+            if (method != Method.POST) return methodNotAllowed("POST");
+            player.stop();
+            return ok(player.statusJson());
+        }
+
+        return json(404, err("no play route: " + sub + " (available: status, begin, chunk, end, stop)"));
+    }
+
+    /** 读取定长原始二进制 body（Content-Length 必须；超上限或缺失返回 null）。 */
+    private static byte[] readRawBody(IHTTPSession s, long maxBytes) throws IOException {
+        long len;
+        try {
+            len = Long.parseLong(s.getHeaders().get("content-length"));
+        } catch (Exception e) {
+            return null;
+        }
+        if (len <= 0 || len > maxBytes) return null;
+
+        byte[] buf = new byte[(int) len];
+        InputStream in = s.getInputStream();
+        int off = 0;
+        while (off < len) {
+            int n = in.read(buf, off, (int) (len - off));
+            if (n <= 0) break;
+            off += n;
+        }
+        return off == len ? buf : java.util.Arrays.copyOf(buf, off);
     }
 
     private Response micControl(IHTTPSession s, VoiceController voice) throws Exception {
