@@ -8,6 +8,7 @@
 
 ### Added
 
+* **屏幕亮度控制面 `/api/brightness`（GET 状态 / POST `{"value":1..255}` 夹紧）**：`GET /api/status` 增加 `brightness` 摘要。双层写入——窗口 `screenBrightness` 覆盖立即生效（全屏 HOME 应用，窗口即整块投影屏）+ `Settings.System.SCREEN_BRIGHTNESS` 系统级持久（manifest 补 `WRITE_SETTINGS`，API 22 安装时授予）；应用内 SharedPreferences 兜底，重启由 `MainActivityMinimum.onCreate` 挂接重放。窗口属性经 UI 线程投递，HTTP 线程不触碰 Window。`docs/API.md` v0.8：新增 §10，后续章节顺延。
 * 触摸条 F3 静音键：一键将媒体音量设为 0，再按恢复此前档位；档位跨应用重启保存，音量提示条显示“静音”。
 * 音量键反馈：在模型画面上方显示跟随音量平滑变化的分段音量条和百分比，连续按键会刷新停留时间，闲置后淡出；独立叠层补偿设备投影的垂直翻转。
 * Live2D 本地人脸随动：`/api/control/tracking` 开关与持久化配置；单线程 NEON YuNet 原生检测，

@@ -2,8 +2,8 @@
 
 | | |
 |---|---|
-| **文档版本** | 0.7 |
-| **更新日期** | 2026-09-12 |
+| **文档版本** | 0.8 |
+| **更新日期** | 2026-09-28 |
 | **服务端口** | `8900`（HTTP，设备端常驻，随 app 前台启停） |
 | **实测环境** | la0920 智能音箱 · Android 5.1.1 (API 22) · armeabi-v7a · 型号 C2-CMCC |
 | **实现** | NanoHTTPD 2.3.1，`app/src/main/java/com/live2d/demo/minimum/control/` |
@@ -23,10 +23,11 @@
 7. [摄像头 `/api/camera`](#7-摄像头)
 8. [舞台灯 `/api/light`](#8-舞台灯-apilight)
 9. [语音采集 `/api/voice/*`](#9-语音采集-apivoice)
-10. [端到端编排示例](#10-端到端编排示例)
-11. [运维注意事项](#11-运维注意事项)
-12. [已知限制](#12-已知限制)
-13. [路线图](#13-路线图)
+10. [屏幕亮度 `/api/brightness`](#10-屏幕亮度-apibrightness)
+11. [端到端编排示例](#11-端到端编排示例)
+12. [运维注意事项](#12-运维注意事项)
+13. [已知限制](#13-已知限制)
+14. [路线图](#14-路线图)
 - [附录 A：错误码速查](#附录-a错误码速查)
 
 ---
@@ -47,6 +48,7 @@
 | 摄像头 | `/api/camera` | 开关控制、MJPEG 实时流、单帧快照 |
 | 舞台灯 | `/api/light` | 开关、三色常亮 / 闪烁、舞台全亮分段亮度、逐灯直控 |
 | 语音采集 | `/api/voice/*` | 麦克风原始 PCM 上行，供 Mac 侧 ASR |
+| 屏幕亮度 | `/api/brightness` | 投影亮度档位查询 / 设置（1..255），窗口即时生效 + 双层持久化 |
 
 ## 2. 接入
 
@@ -63,12 +65,12 @@ BASE=http://<设备IP>:8900
 
 ### 2.2 鉴权
 
-当前版本**无鉴权**，局域网内明文开放。务必只在与设备同网段的可信环境使用；token 鉴权在路线图中（见 §12、§13）。
+当前版本**无鉴权**，局域网内明文开放。务必只在与设备同网段的可信环境使用；token 鉴权在路线图中（见 §13、§14）。
 
 ### 2.3 前置条件
 
 - 设备屏幕必须点亮：**息屏触发 `onStop`，HTTP 服务随之停止**。调试前先 `adb shell input keyevent KEYCODE_WAKEUP`。
-- 厂商魔改 adbd 的挑战认证过期时（shell 报 `Who are you ? (O_O)???`），重跑 `calc_adbd_auth.py` 后**必须重建 `adb forward`**（见 §11）。
+- 厂商魔改 adbd 的挑战认证过期时（shell 报 `Who are you ? (O_O)???`），重跑 `calc_adbd_auth.py` 后**必须重建 `adb forward`**（见 §12）。
 
 ## 3. 通用约定
 
@@ -103,7 +105,7 @@ BASE=http://<设备IP>:8900
 
 - 凡涉及 `y` 的字段（pose / lookat）：**`y+` 为实体屏向上**。设备投影光路上下颠倒已在应用内镜像补偿，调用方按正常直觉传值即可。
 - `lookat` 的 x/y 为归一化坐标 `-1..1`；`pose` 的 x/y 为逻辑坐标位移 `±2`。
-- 注意：`adb screencap` 截图所见为 framebuffer 原始方向（上下颠倒），与实体屏相反；验证画面以实体屏为准（见 §11）。
+- 注意：`adb screencap` 截图所见为 framebuffer 原始方向（上下颠倒），与实体屏相反；验证画面以实体屏为准（见 §12）。
 
 ## 4. 系统状态
 
@@ -120,7 +122,8 @@ BASE=http://<设备IP>:8900
   "fps": 23.41,
   "uptime_s": 5,
   "camera": { "available": true, "on": false },
-  "light": { "available": true, "mode": "off" }
+  "light": { "available": true, "mode": "off" },
+  "brightness": { "value": 255, "min": 1, "max": 255 }
 }
 ```
 
@@ -135,6 +138,7 @@ BASE=http://<设备IP>:8900
 | `uptime_s` | number | 进程运行秒数 |
 | `camera` | object | 摄像头摘要（详见 §7） |
 | `light` | object | 舞台灯摘要（详见 §8） |
+| `brightness` | object | 屏幕亮度摘要（详见 §10） |
 
 ## 5. 模型资产
 
@@ -260,7 +264,7 @@ curl -X POST "$BASE/api/models/21miku/select"
 - **异步**（202）：GL 线程解析 + 上传贴图，实测 live2d **2~2.5s**、l3d **3~8s**（视包大小）完成上屏；期间画面停留在旧模型最后一帧，无黑屏。以 `/api/status` 的 `model` 变化为准。
 - l3d 模型上屏后，运行时控制用 §6.8 `animation`（pose 共享）；live2d 专属端点（motion/expression/param/lipsync/idle/lookat）返回 `409`。
 - 选中项**持久化**：重启 app 自动加载。
-- 切换语义：**姿态（pose）保留**；动作 / 表情 / 参数直控 / 口型等临场状态清空（新模型不继承）；待机策略回到默认 `on`（见 §11）。
+- 切换语义：**姿态（pose）保留**；动作 / 表情 / 参数直控 / 口型等临场状态清空（新模型不继承）；待机策略回到默认 `on`（见 §12）。
 
 | 状态码 | 场景 |
 |---|---|
@@ -703,7 +707,44 @@ curl -s "$BASE/api/voice/mic/stream" > asr.pcm     # 持续读取，Ctrl-C 停�
 - 消费不过来时丢**最旧**块保新块（`drops` 计数）；正常读取速率下实测稳态零丢块（4s 抓取 121,600 字节 @16 kHz，drops 无增长）。
 - `503`：无麦克风 / 开启失败。
 
-## 10. 端到端编排示例
+## 10. 屏幕亮度 `/api/brightness`
+
+投影屏幕亮度控制。**双层写入**：窗口覆盖（`WindowManager.LayoutParams.screenBrightness`）立即生效——本应用是全屏 HOME 桌面，窗口覆盖即整块投影屏；`Settings.System.SCREEN_BRIGHTNESS` 系统级持久（设备重启保持，需 `WRITE_SETTINGS`）。另以应用内 SharedPreferences 兜底持久，app 重启时重放窗口覆盖——即便厂商 ROM 拒写系统设置也能恢复档位。
+
+不依赖 GL 渲染，与其它控制面并行工作。
+
+### 10.1 `GET /api/brightness` — 状态
+
+```json
+{
+  "available": true,
+  "value": 255,
+  "min": 1,
+  "max": 255
+}
+```
+
+| 字段 | 说明 |
+|---|---|
+| `available` | 是否有可用 Activity 窗口（app 前台运行时恒 true） |
+| `value` | 当前档位 1..255；本会话未设置过时回落系统当前亮度 |
+| `min` / `max` | 刻度范围。1 起——0 档在投影上几乎不可见，无操作意义 |
+
+### 10.2 `POST /api/brightness` — 设置
+
+```bash
+curl -X POST -d '{"value":128}' "$BASE/api/brightness"
+```
+
+| 字段 | 说明 |
+|---|---|
+| `value` | 必填，1..255，超限夹紧 |
+
+- `200` + 最新状态；`400` 缺 `value` / JSON 不合法；`503` 无可用窗口（app 不在前台）。
+- 生效即时（UI 线程投递，下一帧生效），无 202 异步语义。
+- ⚠️ 档位过低时投影画面在亮环境下可能难以辨认；实际观感请以实体投影为准。
+
+## 11. 端到端编排示例
 
 Mac 侧让模型"打招呼说话"的推荐时序：
 
@@ -743,7 +784,7 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 
 > 注意：灯光状态是**设备端保持**的，与模型动作/口型不同步也不自动回落；每个情态结束都要显式下一条命令。
 
-## 11. 运维注意事项
+## 12. 运维注意事项
 
 | 项 | 说明 |
 |---|---|
@@ -754,7 +795,7 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 | 摄像头画面暗 | 摄像头无补光，夜间画面很暗属正常（无夜视模式） |
 | 灯不亮排查 | 顺序看：`GET /api/light` 的 `available`（false = socket 连不上，看 `last_error`）→ logcat 里守护是否回了 `accepted ok` / `CLIENT Verification Success 15  15` / `led Init ok`（收到即协议通）→ 灯本身（用 `{"mode":"custom","leds":[{"id":12,"level":255}]}` 单独点某一颗） |
 
-## 12. 已知限制
+## 13. 已知限制
 
 | 项 | 现状 |
 |---|---|
@@ -769,7 +810,7 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 | 舞台灯呼吸效果 | 守护的 `LEDB`/`libLedBreath` 通道未逆向出参数格式，未暴露（只做了常亮/闪烁/逐灯） |
 | 舞台灯物理验证 | 协议层已在真机证实（守护 accept + 握手 + `led Init ok`）；**"灯是否真的亮"未做客观验证**——唯一可用的传感器（摄像头）被自动曝光/白平衡抖动淹没，需人眼确认 |
 
-## 13. 路线图
+## 14. 路线图
 
 | 端点 | 内容 |
 |---|---|
@@ -785,9 +826,9 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 
 | 码 | 典型 `error` 文案 | 处置 |
 |---|---|---|
-| 400 | `invalid JSON body` / `missing level (0..1)` / `missing param id` / `missing mode` / `unsupported l3d format_version: X` / `glb missing: X` / `not a valid glb: X` / `zip contains neither a .model3.json nor a l3d manifest.json` / `unknown mode: X` / `blink only supported for red/green/blue/color` / `color mode needs rgb:[r,g,b] (0..255) or color:"#rrggbb"` / `custom mode needs leds: [...]` / `leds[i].id out of range 1..18` | 修正请求体 |
+| 400 | `invalid JSON body` / `missing level (0..1)` / `missing value (1..255)` / `missing param id` / `missing mode` / `unsupported l3d format_version: X` / `glb missing: X` / `not a valid glb: X` / `zip contains neither a .model3.json nor a l3d manifest.json` / `unknown mode: X` / `blink only supported for red/green/blue/color` / `color mode needs rgb:[r,g,b] (0..255) or color:"#rrggbb"` / `custom mode needs leds: [...]` / `leds[i].id out of range 1..18` | 修正请求体 |
 | 403 | 内置模型删除 | 不可操作 |
 | 404 | `model not found: X` / `motion group not found: X` / `no route: X` / `no light route: X` | 核对名称与路由 |
 | 405 | （带 `Allow` 头） | 换用允许的方法 |
 | 409 | `model already exists` / `model is loaded, select another first` / `current model is not l3d` / `current model is l3d; live2d control ... unavailable` | 先删后传 / 先切走再删 / 用对类型的控制端点 |
-| 503 | `renderer not ready, retry later` / `no model loaded` / `camera open failed` / `no camera on device` / `camera warming up` / `microphone start failed` / `zhcctrl unavailable: ...` | 稍后重试或检查设备能力 |
+| 503 | `renderer not ready, retry later` / `no model loaded` / `camera open failed` / `no camera on device` / `camera warming up` / `microphone start failed` / `no activity window available` / `zhcctrl unavailable: ...` | 稍后重试或检查设备能力 |

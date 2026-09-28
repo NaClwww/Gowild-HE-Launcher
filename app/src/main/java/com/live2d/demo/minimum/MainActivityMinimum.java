@@ -14,6 +14,7 @@ import android.util.Log;
 import android.view.MotionEvent;
 import android.view.WindowManager;
 
+import com.live2d.demo.minimum.control.BrightnessController;
 import com.live2d.demo.minimum.control.CameraController;
 import com.live2d.demo.minimum.control.ControlServer;
 import com.live2d.demo.minimum.control.FaceTracker;
@@ -51,6 +52,8 @@ public class MainActivityMinimum extends Activity {
         _glSurfaceView.setRenderMode(GLSurfaceView.RENDERMODE_CONTINUOUSLY);
 
         setContentView(_glSurfaceView);
+        // /api/brightness：挂接窗口并重放持久化亮度档位
+        BrightnessController.get().attach(this);
         _volumeOverlay = new VolumeOverlayView(this);
         // GL 模型已单独补偿投影翻转；Android 叠层也要做同样的垂直翻转。
         _volumeOverlay.setScaleY(-1f);
@@ -133,6 +136,7 @@ public class MainActivityMinimum extends Activity {
     protected void onDestroy() {
         super.onDestroy();
 
+        BrightnessController.get().detach();
         LAppMinimumDelegate.getInstance().onDestroy();
     }
 

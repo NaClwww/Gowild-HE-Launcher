@@ -78,6 +78,10 @@ public class ControlServer extends NanoHTTPD {
             return light(uri, s, method);
         }
 
+        if (uri.equals("/api/brightness")) {
+            return brightness(s, method);
+        }
+
         ModelRepository repo = ModelRepository.get(LAppMinimumDelegate.getInstance().getActivity());
 
         if (uri.equals("/api/models")) {
@@ -322,6 +326,39 @@ public class ControlServer extends NanoHTTPD {
                 return json(503, err(light.getLastError() != null ? light.getLastError() : "light unavailable"));
             }
             return ok(light.statusJson());
+        }
+        return methodNotAllowed("GET, POST");
+    }
+
+    /**
+     * /api/brightness：屏幕亮度（投影）。GET → 状态；POST → {"value":1..255}（超限夹紧）。
+     * 双层写入：窗口覆盖立即生效 + Settings.System 持久；app 重启由本地持久重放。
+     */
+    private Response brightness(IHTTPSession s, Method method) throws Exception {
+        BrightnessController brightness = BrightnessController.get();
+        if (method == Method.GET) {
+            return ok(brightness.statusJson());
+        }
+        if (method == Method.POST) {
+            JSONObject in;
+            try {
+                in = new JSONObject(readBody(s));
+            } catch (Exception e) {
+                return json(400, err("invalid JSON body"));
+            }
+            if (!in.has("value")) {
+                return json(400, err("missing value (" + BrightnessController.MIN + ".."
+                    + BrightnessController.MAX + ")"));
+            }
+            try {
+                in.get("value");
+            } catch (Exception e) {
+                return json(400, err("value must be a number"));
+            }
+            if (!brightness.setValue((int) in.getDouble("value"))) {
+                return json(503, err("no activity window available"));
+            }
+            return ok(brightness.statusJson());
         }
         return methodNotAllowed("GET, POST");
     }
@@ -764,6 +801,11 @@ public class ControlServer extends NanoHTTPD {
         o.put("light", new JSONObject()
             .put("available", light.ensureProbed())
             .put("mode", light.getMode()));
+        BrightnessController brightness = BrightnessController.get();
+        o.put("brightness", new JSONObject()
+            .put("value", brightness.getValue())
+            .put("min", BrightnessController.MIN)
+            .put("max", BrightnessController.MAX));
         return ok(o);
     }
 
