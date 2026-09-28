@@ -145,6 +145,7 @@ public class LAppMinimumLive2DManager {
 
     // モデル更新処理及び描画処理を行う
     public void onUpdate() {
+        com.live2d.demo.minimum.control.FaceTracker.get().applyOnGlThread(this);
         int width = LAppMinimumDelegate.getInstance().getWindowWidth();
         int height = LAppMinimumDelegate.getInstance().getWindowHeight();
 

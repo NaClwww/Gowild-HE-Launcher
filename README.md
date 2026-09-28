@@ -13,6 +13,7 @@
   模型转换（`.blend` → l3d 包）属于上游转换工程，不在本仓库。
 - **HTTP 控制面**（NanoHTTPD :8900，随 app 前台启停，全部端点真机实测）：系统状态 / 模型资产与播放控制 / 摄像头 / 舞台灯 / 语音采集。
 - **外设**：18 路 LED 舞台灯（zhcctrl 本地 socket）、摄像头 JPEG 推流（libjpeg-turbo native 通路）、麦克风采集。
+- **本地人脸随动**：Live2D 可离线看向摄像头中的人脸，单线程 NEON 检测、CPU 预算自动降频；默认关闭。[开启与性能验证](docs/LOCAL_FACE_TRACKING.md)。
 
 ## 构建
 
