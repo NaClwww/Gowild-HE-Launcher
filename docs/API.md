@@ -475,6 +475,11 @@ POST {"on":false}           ──显式关闭──▶ 立即关机，进行中
 | `on` | 当前是否预览出帧 |
 | `explicit` | 是否处于显式开启状态 |
 | `clients` | 活跃流连接数 |
+| `audio_source` | 当前实际采集源；停录时为 null |
+| `aec_requested` | 是否请求系统回声消除，默认 true |
+| `aec_available` | 系统是否声明支持 AEC |
+| `aec_enabled` | 当前录音会话效果是否启用；不是声学效果验证结果 |
+| `aec_error` | 最近启动的 AEC 失败/回退原因，无错误为 null |
 | `width`/`height` | 实际协商出的预览分辨率 |
 | `fps` | 编码限频目标（10）；实际帧率受 HAL 供帧限制（本机实测 ~6–7） |
 | `quality` | JPEG 编码质量 |
@@ -638,7 +643,7 @@ curl -X POST -d '{"mode":"custom","leds":[{"id":1,"level":255},{"id":12,"level":
 
 ## 9. 语音采集 `/api/voice/*`
 
-麦克风原始音频上行，供 Mac 侧 ASR。路由形如 `/api/voice/{name}/*`，`{name}` 为**采集源名**（当前仅 `mic`，后续新源在此扩展）。输出 **PCM16LE 单声道**，默认 16 kHz，8k~48k 可调。与 Live2D 渲染、摄像头并行互不影响。
+麦克风音频上行，供后端 ASR。路由形如 `/api/voice/{name}/*`，`{name}` 为**采集源名**（当前仅 `mic`，后续新源在此扩展）。输出 **PCM16LE 单声道**，默认 16 kHz，8k~48k 可调。与 Live2D 渲染、摄像头并行互不影响。
 
 **生命周期**（与摄像头同款设计）：
 
@@ -648,9 +653,11 @@ GET  /mic/stream                ──隐式开启──▶ 无人读取持续 1
 stop / {"on":false}             ──显式关闭──▶ 立即停，进行中的流收到 EOF（重连即隐式重开）
 ```
 
-- 采集源为 `VOICE_RECOGNITION`（无 AGC，原始电平，适合 ASR 特征）。
-- `rate` 变更会重开 AudioRecord，瞬时可能掉 ~100ms 数据。
-- ⚠️ 采集与扬声器播放同时进行时会拾到本机外放声（无回声消除），网关侧注意时序错开。
+- 默认请求系统 AEC：保留 `VOICE_RECOGNITION`，绑定录音 session 的 `AcousticEchoCanceler` 并检查启用结果。la0920 的通信录音源在本次测试中导致系统音频服务停止卡住，因此不切换到 `VOICE_COMMUNICATION`。
+- 系统不支持 AEC、创建/启用效果失败时，回退 `VOICE_RECOGNITION` 普通采集；`aec_error` 给出原因。
+- `aec:false` 使用原来的 `VOICE_RECOGNITION` 路径。开关仅在当前进程保存，重启默认开启。
+- `rate` 或 `aec` 变更会重开 AudioRecord 并清空客户端旧音频队列，有短暂音频缺口。
+- `aec_enabled:true` 仅表示系统效果已启用，不保证此 ROM 对当前 `USAGE_MEDIA` 外放链路消回声有效。需实机验证，不能据此自动解除上游半双工闸门。
 
 ### 8.1 `GET /api/voice/mic` — 状态
 
@@ -662,6 +669,11 @@ stop / {"on":false}             ──显式关闭──▶ 立即停，进行�
   "clients": 0,
   "rate": 16000,
   "format": "pcm16le mono",
+  "audio_source": null,
+  "aec_requested": true,
+  "aec_available": true,
+  "aec_enabled": false,
+  "aec_error": null,
   "seq": 0,
   "drops": 0
 }
@@ -672,6 +684,11 @@ stop / {"on":false}             ──显式关闭──▶ 立即停，进行�
 | `available` | 设备是否有麦克风 |
 | `on` / `explicit` | 采集中 / 是否显式开启 |
 | `clients` | 活跃流连接数 |
+| `audio_source` | 当前实际采集源；停录时为 null |
+| `aec_requested` | 是否请求系统回声消除，默认 true |
+| `aec_available` | 系统是否声明支持 AEC |
+| `aec_enabled` | 当前录音会话效果是否启用；不是声学效果验证结果 |
+| `aec_error` | 最近启动的 AEC 失败/回退原因，无错误为 null |
 | `rate` | 当前采样率 |
 | `seq` | 累计采集块数（40ms/块，单调递增） |
 | `drops` | 队列满被丢弃的最旧块计数（**有读者时稳态为 0**；显式开启但无人读会持续增长，属预期） |
@@ -686,13 +703,14 @@ curl -X POST -d '{"on":false}'             "$BASE/api/voice/mic"
 | 字段 | 默认 | 说明 |
 |---|---|---|
 | `on`（或 `enabled`） | 保持不变 | 显式开/关 |
-| `rate` | 16000 | 采样率 8000~48000，超限夹紧；变更即重开采集 |
+| `rate` | 当前速率 | 采样率 8000~48000，超限夹紧；变更即重开采集 |
+| `aec` | 保持不变，进程初始 true | 请求系统 AEC；采集中变更会重开会话 |
 
 - `200` + 最新状态；`400` JSON 不合法；`503` 开启失败。
 
 ### 8.3 `POST /api/voice/mic/start` · `POST /api/voice/mic/stop`
 
-等价于 `{"on":true}` / `{"on":false}` 的快捷形式。`start` 可带 `{"rate":16000}`（空 body 合法，沿用当前速率）。
+等价于 `{"on":true}` / `{"on":false}` 的快捷形式。`start` 可带 `{"rate":16000,"aec":true}`（空 body 合法，沿用当前速率）。
 
 ### 8.4 `GET /api/voice/mic/stream` — PCM 实时流（ASR 接入口）
 
@@ -832,3 +850,19 @@ Mac 侧让模型"打招呼说话"的推荐时序：
 | 405 | （带 `Allow` 头） | 换用允许的方法 |
 | 409 | `model already exists` / `model is loaded, select another first` / `current model is not l3d` / `current model is l3d; live2d control ... unavailable` | 先删后传 / 先切走再删 / 用对类型的控制端点 |
 | 503 | `renderer not ready, retry later` / `no model loaded` / `camera open failed` / `no camera on device` / `camera warming up` / `microphone start failed` / `no activity window available` / `zhcctrl unavailable: ...` | 稍后重试或检查设备能力 |
+
+
+## 系统 AEC 验收
+
+1. `POST /api/voice/mic/start {"aec":true}`，检查 `aec_available`、`aec_enabled`、`audio_source`、`aec_error`。
+2. 直接录制 `/api/voice/mic/stream`（绕过 Go 闸门），分别以 `aec:false`、`aec:true` 播放同一段语音，保持音量和位置一致；比较外放残留。
+3. 播放时真人同时说话，确认人声仍然清楚；分别测试安静、较大音量、停止播放后的尾部回声。
+4. 只有上述声学测试通过，才在上游另行启用全双工与打断。若效果不支持或无效，后续需接带最终播放 PCM 参考流的软件 AEC。
+
+
+生命周期回归：`adb forward tcp:18900 tcp:8900` 后运行 `python3 tools/check-mic-aec.py`。
+该脚本会短暂切换录音开关、AEC 和采样率，验证真实 PCM 输出，最后恢复原采样率、AEC 请求和显式开关；不代表声学质量测试通过。
+
+2026-09-29 la0920 实机记录：系统提供 Qualcomm Fluence AEC，保留 `VOICE_RECOGNITION` 后 AEC 启用成功，四轮开关与连续录音通过。使用通信录音源曾导致系统音频服务停止阻塞，重启设备恢复，最终实现不使用该源。测试音录音与环境底噪差异不足，且无人现场确认外放，因此没有得出回声衰减量或双讲效果结论；上游半双工保护仍保留。
+
+后续 agent 联调（2026-09-29 20:12–20:15）：真实模型调用 speak，经 TTS/RVC 在音箱播放；独立 ASR 观察通道在 AEC 开与关时均完整识别了播放句子。当前系统效果不足以替代半双工保护。详见聚合目录 `docs/benchmarks/aec-agent-20260929/README.md` 和回采 WAV。

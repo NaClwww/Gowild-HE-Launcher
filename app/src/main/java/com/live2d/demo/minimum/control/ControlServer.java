@@ -169,7 +169,8 @@ public class ControlServer extends NanoHTTPD {
             } catch (Exception e) {
                 in = new JSONObject(); // 允许空 body
             }
-            if (!voice.micStart(true, in.optInt("rate", voice.getMicRate()))) {
+            if (!voice.micStart(true, in.optInt("rate", voice.getMicRate()),
+                in.optBoolean("aec", voice.isAecRequested()))) {
                 return json(503, err("microphone start failed"));
             }
             return ok(voice.micStatusJson());
@@ -284,11 +285,13 @@ public class ControlServer extends NanoHTTPD {
         }
         boolean on = in.optBoolean("on", in.optBoolean("enabled", voice.isMicOn()));
         if (on) {
-            if (!voice.micStart(true, in.optInt("rate", voice.getMicRate()))) {
+            if (!voice.micStart(true, in.optInt("rate", voice.getMicRate()),
+                in.optBoolean("aec", voice.isAecRequested()))) {
                 return json(503, err("microphone start failed"));
             }
         } else {
-            voice.micStop(true);
+            if (in.has("aec")) voice.micStopWithAec(in.optBoolean("aec"));
+            else voice.micStop(true);
         }
         return ok(voice.micStatusJson());
     }
